@@ -11,9 +11,9 @@ namespace CalibrationEnv
         private static List<IWebSocketConnection> clients = new List<IWebSocketConnection>();
 
         private static uint resonitePort = 0;
-        private static int clientPort = 5678;
+        private static int clientPort = 4196;
 
-        private static uint msgInterval = 1000;
+        private static int msgInterval = 1000;
 
         public static async Task Main(string[] args)
         {
@@ -91,8 +91,8 @@ namespace CalibrationEnv
                 // receive response
                 var buffer = new byte[8192];
                 var segment = new ArraySegment<byte>(buffer);
-                using var ms = new System.IO.MemoryStream();
-                System.Net.WebSockets.WebSocketReceiveResult result;
+                using var ms = new MemoryStream();
+                WebSocketReceiveResult result;
                 do
                 {
                     result = await socket.ReceiveAsync(segment, default);
@@ -102,7 +102,7 @@ namespace CalibrationEnv
                 string response = Encoding.UTF8.GetString(ms.ToArray());
                 Console.WriteLine($"Received from Resonite: {response}");
 
-                // Forward to clients
+                // forward to clients
                 foreach (var client in clients.ToList())
                 {
                     if (client.IsAvailable)
