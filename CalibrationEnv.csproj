@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Fleck" Version="1.2.0" />
     <PackageReference Include="YellowDogMan.ResoniteLink" Version="0.10.0" />
   </ItemGroup>
 

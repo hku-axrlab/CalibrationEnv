@@ -1,61 +1,49 @@
 ﻿using ResoniteLink;
-using System.Net;
-using System.Net.Sockets;
-using System.Net.WebSockets;
-using System.Reflection;
+using Fleck;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Text.Json.Serialization;
-using System.Text.Json.Serialization.Metadata;
+using System.Net;
+using System.Net.Sockets;
+using System.Net.WebSockets;
 
 namespace CalibrationEnv
 {
     public class Program
     {
-        private static List<WebSocket> clients = new List<WebSocket>();
+        private static List<IWebSocketConnection> clients = new List<IWebSocketConnection>();
 
-        public static uint resonitePort = 0;
-        public static int clientPort = 5678;
+        private static uint resonitePort = 0;
+        private static int clientPort = 5678;
+
+        private static uint msgInterval = 1000;
 
         public static async Task Main(string[] args)
         {
-            // start server in background
-            _ = Task.Run(async () =>
+            // start fleck websocket server
+            var server = new WebSocketServer($"ws://0.0.0.0:{clientPort}");
+            server.Start(socket =>
             {
-                var listener = new TcpListener(IPAddress.Loopback, clientPort);
-                listener.Start();
-
-                Console.WriteLine($"WebSocket server started on ws://localhost:{clientPort}/ws/");
-
-                while (true)
+                socket.OnOpen = () =>
                 {
-                    var tcpClient = await listener.AcceptTcpClientAsync();
-                    _ = Task.Run(async () =>
-                    {
-                        using var ws = WebSocket.CreateFromStream(tcpClient.GetStream(), true, null, TimeSpan.FromSeconds(30));
-                        clients.Add(ws);
-                        Console.WriteLine("Unity client connected");
+                    clients.Add(socket);
+                    Console.WriteLine("Unity client connected");
+                };
 
-                        var buffer = new byte[4096];
-                        try
-                        {
-                            while (ws.State == WebSocketState.Open)
-                            {
-                                var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
-                                if (result.MessageType == WebSocketMessageType.Close)
-                                    await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", CancellationToken.None);
-                            }
-                        }
-                        catch { }
-                        finally
-                        {
-                            clients.Remove(ws);
-                            Console.WriteLine("Unity client disconnected");
-                        }
-                    });
-                }
+                socket.OnClose = () =>
+                {
+                    clients.Remove(socket);
+                    Console.WriteLine("Unity client disconnected");
+                };
+
+                socket.OnMessage = msg =>
+                {
+                    Console.WriteLine("Received from Unity: " + msg);
+                    // TODO: respond to Unity msg
+                };
             });
+
+            Console.WriteLine($"WebSocket server started on ws://0.0.0.0:{clientPort}");
 
             // prompt for port resonite
             Console.Write("Enter port number Resonite world: ");
@@ -67,8 +55,8 @@ namespace CalibrationEnv
 
             // open socket connection to resonite world
             using var socket = new ClientWebSocket();
-            var uri = new Uri($"ws://localhost:{resonitePort}");
-            await socket.ConnectAsync(uri, CancellationToken.None);
+            await socket.ConnectAsync(new Uri($"ws://localhost:{resonitePort}"), CancellationToken.None);
+            Console.WriteLine("Connected to Resonite world!");
 
             // request data from resonite and broadcast to clients
             while (true)
@@ -105,29 +93,27 @@ namespace CalibrationEnv
 
                 // receive response
                 var buffer = new byte[8192];
-                var message = new ArraySegment<byte>(buffer);
-                using var ms = new MemoryStream();
-
-                WebSocketReceiveResult result;
+                var segment = new ArraySegment<byte>(buffer);
+                using var ms = new System.IO.MemoryStream();
+                System.Net.WebSockets.WebSocketReceiveResult result;
                 do
                 {
-                    result = await socket.ReceiveAsync(message, CancellationToken.None);
-                    ms.Write(message.Array!, message.Offset, result.Count);
+                    result = await socket.ReceiveAsync(segment, default);
+                    ms.Write(buffer, 0, result.Count);
                 } while (!result.EndOfMessage);
 
                 string response = Encoding.UTF8.GetString(ms.ToArray());
-                Console.WriteLine($"Received: {response}");
+                Console.WriteLine($"Received from Resonite: {response}");
 
-                // forward response
-                var forwardingBytes = Encoding.UTF8.GetBytes(response);
-
+                // Forward to clients
                 foreach (var client in clients.ToList())
                 {
-                    if (client.State == WebSocketState.Open)
-                        await client.SendAsync(forwardingBytes, WebSocketMessageType.Text, true, CancellationToken.None);
+                    if (client.IsAvailable)
+                        client.Send(response);
                 }
 
-                await Task.Delay(1000);
+                // wait out interval time
+                await Task.Delay(msgInterval); 
             }
         }
     }
