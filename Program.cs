@@ -1,4 +1,6 @@
 ﻿using ResoniteLink;
+using System.Net;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Reflection;
 using System.Text;
@@ -11,63 +13,122 @@ namespace CalibrationEnv
 {
     public class Program
     {
-        static async Task Main(string[] args)
-        {
-            // prompt portnumber resonite world
-            Console.Write("Enter port number: ");
-            string? input = Console.ReadLine();
+        private static List<WebSocket> clients = new List<WebSocket>();
 
-            if (!uint.TryParse(input, out uint portNumber))
+        public static uint resonitePort = 0;
+        public static int clientPort = 5678;
+
+        public static async Task Main(string[] args)
+        {
+            // start server in background
+            _ = Task.Run(async () =>
+            {
+                var listener = new TcpListener(IPAddress.Loopback, clientPort);
+                listener.Start();
+
+                Console.WriteLine($"WebSocket server started on ws://localhost:{clientPort}/ws/");
+
+                while (true)
+                {
+                    var tcpClient = await listener.AcceptTcpClientAsync();
+                    _ = Task.Run(async () =>
+                    {
+                        using var ws = WebSocket.CreateFromStream(tcpClient.GetStream(), true, null, TimeSpan.FromSeconds(30));
+                        clients.Add(ws);
+                        Console.WriteLine("Unity client connected");
+
+                        var buffer = new byte[4096];
+                        try
+                        {
+                            while (ws.State == WebSocketState.Open)
+                            {
+                                var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
+                                if (result.MessageType == WebSocketMessageType.Close)
+                                    await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", CancellationToken.None);
+                            }
+                        }
+                        catch { }
+                        finally
+                        {
+                            clients.Remove(ws);
+                            Console.WriteLine("Unity client disconnected");
+                        }
+                    });
+                }
+            });
+
+            // prompt for port resonite
+            Console.Write("Enter port number Resonite world: ");
+            string? input = Console.ReadLine();
+            if (!uint.TryParse(input, out resonitePort))
             {
                 Console.WriteLine("Invalid port number.");
-                return;
             }
 
             // open socket connection to resonite world
             using var socket = new ClientWebSocket();
-            var uri = new Uri($"ws://localhost:{portNumber}");
+            var uri = new Uri($"ws://localhost:{resonitePort}");
             await socket.ConnectAsync(uri, CancellationToken.None);
 
-            // build message to Get Root slot
-            var messageObject = new GetSlot
+            // request data from resonite and broadcast to clients
+            while (true)
             {
-                MessageID = Guid.NewGuid().ToString(),
-                SlotID = "Root",
-                IncludeComponentData = false,
-                Depth = 0
-            };
+                // wait if there aren't any clients
+                //if (clients.Count <= 0)
+                //    continue;
 
-            // serialize message to json and send to resonite world
-            var jsonNode = JsonSerializer.SerializeToNode(messageObject)!;
-            jsonNode["$type"] = "getSlot";
-            string json = jsonNode.ToJsonString();
-            var bytes = Encoding.UTF8.GetBytes(json);
+                // build message to Get Root slot
+                var messageObject = new GetSlot
+                {
+                    MessageID = Guid.NewGuid().ToString(),
+                    SlotID = "Root",
+                    IncludeComponentData = false,
+                    Depth = 0
+                };
 
-            Console.WriteLine("Sending message: " + json);
+                // serialize message to json and send to resonite world
+                var jsonNode = JsonSerializer.SerializeToNode(messageObject)!;
+                jsonNode["$type"] = "getSlot";
+                string json = jsonNode.ToJsonString();
+                var bytes = Encoding.UTF8.GetBytes(json);
 
-            await socket.SendAsync(
-                bytes,
-                WebSocketMessageType.Text,
-                true,
-                CancellationToken.None
-            );
+                Console.WriteLine("Sending message: " + json);
 
-            Console.WriteLine("Message sent to the server.");
+                await socket.SendAsync(
+                    bytes,
+                    WebSocketMessageType.Text,
+                    true,
+                    CancellationToken.None
+                );
 
-            // receive response
-            var buffer = new byte[4096];
-            var message = new ArraySegment<byte>(buffer);
-            using var ms = new MemoryStream();
+                Console.WriteLine("Message sent to the server.");
 
-            WebSocketReceiveResult result;
-            do
-            {
-                result = await socket.ReceiveAsync(message, CancellationToken.None);
-                ms.Write(message.Array!, message.Offset, result.Count);
-            } while (!result.EndOfMessage);
+                // receive response
+                var buffer = new byte[8192];
+                var message = new ArraySegment<byte>(buffer);
+                using var ms = new MemoryStream();
 
-            string response = Encoding.UTF8.GetString(ms.ToArray());
-            Console.WriteLine($"Received: {response}");
+                WebSocketReceiveResult result;
+                do
+                {
+                    result = await socket.ReceiveAsync(message, CancellationToken.None);
+                    ms.Write(message.Array!, message.Offset, result.Count);
+                } while (!result.EndOfMessage);
+
+                string response = Encoding.UTF8.GetString(ms.ToArray());
+                Console.WriteLine($"Received: {response}");
+
+                // forward response
+                var forwardingBytes = Encoding.UTF8.GetBytes(response);
+
+                foreach (var client in clients.ToList())
+                {
+                    if (client.State == WebSocketState.Open)
+                        await client.SendAsync(forwardingBytes, WebSocketMessageType.Text, true, CancellationToken.None);
+                }
+
+                await Task.Delay(1000);
+            }
         }
     }
 }
