@@ -18,7 +18,7 @@ namespace CalibrationEnv
         private static int clientPort = 4196;
 
         private static int rootMsgInterval = 1000;
-        private static int childMsgInterval = 1000;//17;
+        private static int childMsgInterval = 17;
 
         private static List<string> registeredSlots = new List<string>();
         private static readonly object slotsLock = new object();
