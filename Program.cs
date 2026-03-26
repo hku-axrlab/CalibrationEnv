@@ -10,34 +10,56 @@ namespace CalibrationEnv
 {
     public class Program
     {
-        // TODO: can I use the same socket on both tasks? 
-        private static ClientWebSocket socket = new ClientWebSocket();
-        private static List<IWebSocketConnection> clients = new List<IWebSocketConnection>();
-
+        // port to ResoniteLink, obtain from Resonite and input during prompt
         private static uint resonitePort = 0;
+
+        // port to clients, e.g. Unity
         private static int clientPort = 4196;
 
+        // interval times for requesting slots, in ms
         private static int rootMsgInterval = 1000;
         private static int childMsgInterval = 17;
 
+        // websocket connection to Resonite world
+        private static ClientWebSocket socket = new ClientWebSocket();
+        private static readonly SemaphoreSlim socketLock = new SemaphoreSlim(1, 1);
+
+        // pending requests collection, to match responses with requests using message ID
+        private static readonly Dictionary<string, TaskCompletionSource<string>> pendingRequests = new Dictionary<string, TaskCompletionSource<string>>();
+        private static readonly object pendingLock = new object();
+
+        // connected clients collection, to forward slot data responses to all connected clients
+        private static List<IWebSocketConnection> clients = new List<IWebSocketConnection>();
+        private static readonly object clientsLock = new object();
+
+        // registered slot collection, to keep track of discovered slot ID's from Root slot,
+        // and request data on those in batch, only interested in tagged slots
         private static List<string> registeredSlots = new List<string>();
         private static readonly object slotsLock = new object();
 
-        public static async Task Main(string[] args)
+        public static async Task Main()
         {
-            // start fleck websocket server
+            // start fleck websocket server to client
             var server = new WebSocketServer($"ws://0.0.0.0:{clientPort}");
             server.Start(socket =>
             {
                 socket.OnOpen = () =>
                 {
-                    clients.Add(socket);
+                    lock (clientsLock)
+                    {
+                        clients.Add(socket);
+                    }
+
                     Console.WriteLine("Unity client connected");
                 };
 
                 socket.OnClose = () =>
                 {
-                    clients.Remove(socket);
+                    lock (clientsLock)
+                    {
+                        clients.Remove(socket);
+                    }
+
                     Console.WriteLine("Unity client disconnected");
                 };
 
@@ -50,7 +72,7 @@ namespace CalibrationEnv
 
             Console.WriteLine($"WebSocket server started on ws://0.0.0.0:{clientPort}");
 
-            // prompt for port resonite
+            // prompt for port to Resonite world
             Console.Write("Enter port number Resonite world: ");
             string? input = Console.ReadLine();
             if (!uint.TryParse(input, out resonitePort))
@@ -58,130 +80,258 @@ namespace CalibrationEnv
                 Console.WriteLine("Invalid port number.");
             }
 
-            // open socket connection to resonite world
+            // open socket connection to Resonite world
             socket = new ClientWebSocket();
             await socket.ConnectAsync(new Uri($"ws://localhost:{resonitePort}"), CancellationToken.None);
             Console.WriteLine("Connected to Resonite world!");
 
-            // start loop to get Root slot and childern slots
-            _ = GetRootLoop();
-            _ = GetChildernLoop();
-
-            // TODO: lol i dont wanna wait here for no reason
-            // but like otherwise the app shuts down (:
-            while (true)
-            {
-                await Task.Delay(10000);
-            }
+            // start tasks to get, process and forward Root and childern slots
+            await Task.WhenAll(ReceiveLoop(), GetRootLoop(), GetChildernLoop());
         }
 
-        private static async Task GetRootLoop()
+        private static async Task ReceiveLoop()
         {
+            var buffer = new byte[8192];
+
             while (true)
             {
-                // send msg to get Root 
-                await socket.SendAsync(
-                    GetMsgAsByteArray(BuildGetSlotMsg("Root", false), "getSlot"),
-                    WebSocketMessageType.Text,
-                    true,
-                    CancellationToken.None
-                );
-
-                //Console.WriteLine("Message GetSlot, Root sent to the server.");
-
-                // @Aaron: I would like this to be a reusable fucntion... 
-                // But idk how to make something async that returns a string/has an out param. 
-
-                // receive response
-                var buffer = new byte[8192];
+                // receive full message from Resonite world, which might come in multiple frames,
+                // and combine to single string msg
                 var segment = new ArraySegment<byte>(buffer);
                 using var ms = new MemoryStream();
                 WebSocketReceiveResult result;
                 do
                 {
-                    result = await socket.ReceiveAsync(segment, default);
+                    result = await socket.ReceiveAsync(segment, CancellationToken.None);
                     ms.Write(buffer, 0, result.Count);
                 } while (!result.EndOfMessage);
 
-                string response = Encoding.UTF8.GetString(ms.ToArray());
-                //Console.WriteLine($"Received from Resonite: {response}");
+                string msg = Encoding.UTF8.GetString(ms.ToArray());
 
-                // process, adds to collection used in multiple tasks
-                // so lock for thread safety
+                // extract message ID from JSON and add to pending requests
+                string? msgId = ExtractMessageID(msg);
+                TaskCompletionSource<string>? tcs = null;
+
+                lock (pendingLock)
+                {
+                    if (msgId != null && pendingRequests.TryGetValue(msgId, out tcs))
+                    {
+                        pendingRequests.Remove(msgId);
+                    }
+                    else
+                    {
+                        Console.WriteLine("Received untracked message: " + msg);
+                    }
+                }
+
+                if (tcs != null)
+                {
+                    tcs.SetResult(msg);
+                }
+            }
+        }
+
+        private static string? ExtractMessageID(string json)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("sourceMessageId", out var idProp))
+                    return idProp.GetString();
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static async Task<string> SendRequestAsync(Message msg, string type)
+        {
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (pendingLock)
+            {
+                pendingRequests[msg.MessageID] = tcs;
+            }
+
+            byte[] bytes = GetMsgAsByteArray(msg, type);
+
+            await socketLock.WaitAsync();
+            try
+            {
+                await socket.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None);
+            }
+            finally
+            {
+                socketLock.Release();
+            }
+
+            // wait for response with timeout
+            var completed = await Task.WhenAny(tcs.Task, Task.Delay(10000));
+
+            if (completed != tcs.Task)
+            {
+                lock (pendingLock)
+                {
+                    pendingRequests.Remove(msg.MessageID);
+                }
+
+                throw new TimeoutException("No response received");
+            }
+
+            return await tcs.Task;
+        }
+
+        #region ROOT_SLOT
+        private static async Task GetRootLoop()
+        {
+            while (true)
+            {
+                // get Root slot data 
+                var msg = BuildGetSlotMsg("Root", false);
+                string response = await SendRequestAsync(msg, "getSlot");
+                //Console.WriteLine("\nReceived Root response: " + response);
+
+                // process response to extract child ID's and add to registered slots collection,
+                // which will be used to request childern slot data in batch
                 lock (slotsLock)
                 {
                     ProcessGetRootResponse(response);
                 }
 
-                // forward to clients
-                // TODO: don't forward this, forward the children responses
-                // so remove soon
-                /*foreach (var client in clients.ToList())
-                {
-                    if (client.IsAvailable)
-                        await client.Send(response);
-                }*/
-
-                // wait
+                // wait 
                 await Task.Delay(rootMsgInterval);
             }
         }
 
+        private static void ProcessGetRootResponse(string response)
+        {
+            // get response as JSONElement 
+            var jsonRoot = JsonDocument.Parse(response).RootElement;
+
+            // error handling 
+            if (!CheckJSONResponse(jsonRoot, "slotData"))
+                return;
+
+            Console.WriteLine("\nReceived Root response with ID: " + jsonRoot.GetProperty("sourceMessageId"));
+
+            // get core data 
+            var data = jsonRoot.GetProperty("data");
+
+            // get ID's from all children, 
+            // add to collection if not yet discovered
+            var children = data.GetProperty("children").EnumerateArray();
+
+            foreach (var child in children)
+            {
+                // add child id to registered slots
+                // but only interesseted in tagged childern
+                var childID = child.GetProperty("id").GetString()!;
+                var childTag = child.GetProperty("tag").GetProperty("value").GetString();
+
+                if (string.IsNullOrEmpty(childTag))
+                    continue;
+
+                if (!registeredSlots.Contains(childID))
+                    registeredSlots.Add(childID);
+            }
+        }
+        #endregion
+
+        #region CHILD_SLOTS
         private static async Task GetChildernLoop()
         {
             while (true)
             {
+                // get a copy of the current registered slots to do batch operation on
+                List<string> snapshotRegisteredSlots;
+                lock (slotsLock)
+                {
+                    snapshotRegisteredSlots = registeredSlots.ToList();
+                }
+
                 // do batch operation: get slot on all registered id's
-                DataModelOperationBatch batchMsg = new DataModelOperationBatch();
+                var batchMsg = new DataModelOperationBatch();
+                batchMsg.MessageID = Guid.NewGuid().ToString();
                 batchMsg.Operations = new List<Message>();
-                foreach (var childID in registeredSlots)
+                foreach (var childID in snapshotRegisteredSlots)
                 {
                     batchMsg.Operations.Add(BuildGetSlotMsg(childID, true));
                 }
 
-                // send msg
-                await socket.SendAsync(
-                    GetMsgAsByteArray(batchMsg, "dataModelOperationBatch"),
-                    WebSocketMessageType.Text,
-                    true,
-                    CancellationToken.None
-                );
+                // wait to receive response
+                string response = await SendRequestAsync(batchMsg, "dataModelOperationBatch");
+                //Console.WriteLine("\nReceived Batch children response: " + response);
 
-                // receive response
-                var buffer = new byte[8192];
-                var segment = new ArraySegment<byte>(buffer);
-                using var ms = new MemoryStream();
-                WebSocketReceiveResult result;
-                do
-                {
-                    result = await socket.ReceiveAsync(segment, default);
-                    ms.Write(buffer, 0, result.Count);
-                } while (!result.EndOfMessage);
+                var jsonRoot = JsonDocument.Parse(response).RootElement;
+                Console.WriteLine("\nReceived Batch children response with ID: " + jsonRoot.GetProperty("sourceMessageId"));
 
-                string response = Encoding.UTF8.GetString(ms.ToArray());
-                Console.WriteLine($"Received from Resonite: {response}");
-
-                //lock (slotsLock)
-                //{
-                    // TODO: check if slot was removed from scene, if so remove from collection
-                    //ProcessGetChildResponse(response);
-                //}
+                // TODO: call process data
 
                 // forward to clients
-                foreach (var client in clients.ToList())
+
+                // take snapshot of clients to forward to, to avoid locking during send operations 
+                List<IWebSocketConnection> snapshotClients; 
+                lock (clientsLock)
                 {
-                    if (client.IsAvailable)
-                        await client.Send(response);
+                    snapshotClients = clients.ToList();
                 }
 
-                // wait 
+                // forward response to all connected clients,
+                // if error sending to a client, schedule it for removal as it might be disconnected
+                List<IWebSocketConnection> toRemoveClients = new List<IWebSocketConnection>();
+                foreach (var client in snapshotClients)
+                {
+                    try
+                    {
+                        if (client.IsAvailable)
+                        {
+                            await client.Send(response);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error sending message to client, scheduling removal: {ex.Message}");
+                        toRemoveClients.Add(client);
+                    }
+                }
+
+                // remove any clients that had errors during send, as they might be / are probably disconnected
+                if (toRemoveClients.Count > 0)
+                {
+                    lock(clientsLock)
+                    {
+                        foreach (var client in toRemoveClients)
+                        {
+                            clients.Remove(client);
+                        }
+                    }
+                }
+
+                // wait
                 await Task.Delay(childMsgInterval);
             }
         }
 
+        private static void ProcessGetChildResponse(string response)
+        {
+            // get to core data from msg
+            var jsonRoot = JsonDocument.Parse(response).RootElement;
+            var responses = jsonRoot.GetProperty("responses");
+
+            // error handling 
+            if (!CheckJSONResponse(jsonRoot, "batchResponse"))
+                return;
+
+            // TODO: see if child was removed from scene, if so remove from collection
+            // TODO: idk what else we wanna check here? 
+        }
+        #endregion
+
         private static GetSlot BuildGetSlotMsg(string slotID, bool includeComponentData)
         {
-            // build message to Get Root slot
+            // build message to get slot with give ID
             return new GetSlot
             {
                 MessageID = Guid.NewGuid().ToString(),
@@ -202,54 +352,9 @@ namespace CalibrationEnv
             return Encoding.UTF8.GetBytes(json);
         }
 
-        private static void ProcessGetRootResponse(string response)
-        {
-            // get response as JSONElement 
-            var jsonRoot = JsonDocument.Parse(response).RootElement;
-
-            // error handling 
-            if (!CheckJSONResponse(jsonRoot, "slotData"))
-                return;
-
-            // get core data 
-            var data = jsonRoot.GetProperty("data");
-
-            // get ID's from all children, 
-            // add to collection if not yet discovered
-            var children = data.GetProperty("children").EnumerateArray();
-
-            foreach (var child in children)
-            {
-                // TODO: only consider relevant tags 
-
-                var childID = child.GetProperty("id").GetString()!;
-                var childTag = child.GetProperty("tag").GetProperty("value").GetString();
-
-                // only interesseted in tagged childern
-                if (string.IsNullOrEmpty(childTag))
-                    continue;
-
-                if (!registeredSlots.Contains(childID))
-                    registeredSlots.Add(childID);
-            }
-        }
-
-        private static void ProcessGetChildResponse(string response)
-        {
-            // get to core data from msg
-            var jsonRoot = JsonDocument.Parse(response).RootElement;
-            var responses = jsonRoot.GetProperty("responses");
-
-            // error handling 
-            if (!CheckJSONResponse(jsonRoot, "batchResponse"))
-                return;
-
-            // TODO: see if child was removed from scene, if so remove from collection
-            // TODO: idk what else we wanna check here? just send it to the clients?
-        }
-
         private static bool CheckJSONResponse(JsonElement root, string expectedMsgType)
         {
+            // check if response has expected type, success is true and no error info, otherwise log error and return false
             var responseType = root.GetProperty("$type").GetString();
             var succes = root.GetProperty("success").GetBoolean();
             var errorInfo = root.GetProperty("errorInfo").GetString();
