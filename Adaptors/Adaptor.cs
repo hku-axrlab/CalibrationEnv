@@ -31,7 +31,7 @@ namespace CalibrationEnv
         {
             // change current world model based on msg
             // msg is send from client connected to this adapter
-
+            
         }
     }
 }
