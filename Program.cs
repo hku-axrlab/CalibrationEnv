@@ -8,22 +8,14 @@ namespace CalibrationEnv
 {
     public class Program
     {
-        private static SessionManager sessionManager;
-        private static Task sessionTask;
-
         public static async Task Main()
         {
-            sessionManager = new SessionManager();
-            //sessionTask = sessionManager.Main();
+            var sessionManager = new SessionManager();
 
-            await sessionManager.Main();
-
-            // idk what else go figure 
+            while (true)
+            {
+                // do nothing? 
+            }
         }
-
-
-
-
-
     }
 }
