@@ -1,13 +1,14 @@
 ﻿using Fleck;
-using ResoniteLink;
-using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Text;
 using System.Text.Json;
 
 namespace CalibrationEnv
 {
+    public enum WorldUpdateSource
+    {
+        Resonite,
+        Client
+    }
+
     internal class Adaptor
     {
         // reference to world model to obtain world data 
@@ -33,6 +34,7 @@ namespace CalibrationEnv
         /// <param name="msgRoot">JSONElement containing the root of the message.</param>
         public virtual void Receive(JsonElement msgRoot)
         {
+            worldModel.ApplyUpdate(WorldUpdateSource.Client, msgRoot);
             Console.WriteLine($"Client {socket?.ConnectionInfo.Id} send msg, succesfully received: {msgRoot.ToString()}");
         }
 

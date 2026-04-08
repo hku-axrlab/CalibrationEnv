@@ -32,11 +32,7 @@ namespace CalibrationEnv
 
         public override void Receive(JsonElement msgRoot)
         {
-            // TODO : process msg and update world model accordingly
-
-            // TODO: see if child was removed from scene, if so remove from collection
-
-            worldModel.UpdateWorldModel(msgRoot);
+            worldModel.ApplyUpdate(WorldUpdateSource.Resonite, msgRoot);
         }
 
         protected override async Task Send()

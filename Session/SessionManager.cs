@@ -1,4 +1,6 @@
 ﻿using Fleck;
+using System.Collections;
+using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace CalibrationEnv
@@ -6,20 +8,29 @@ namespace CalibrationEnv
     internal class SessionManager
     {
         // port to clients, e.g. Unity, Unreal, ...
-        private int clientPort = 4196;
+        private readonly int clientPort = 4196;
 
         // adaptor handling communication with Resonite world
-        private ResoniteAdaptor resoniteAdaptor;
+        private readonly ResoniteAdaptor resoniteAdaptor;
 
         // connected clients collections, after connecting and messaging added to adaptors
         // to forward slot data responses to all connected clients
-        private List<IWebSocketConnection> clients = new List<IWebSocketConnection>();
-        private readonly object clientsLock = new object();
-        private Dictionary<Guid, Adaptor> adaptors = new Dictionary<Guid, Adaptor>();
+        private readonly List<IWebSocketConnection> clients = [];
+        private readonly ConcurrentDictionary<Guid, Adaptor> adaptors = new();
+
+        // action queue to process seperately from client messages, e.g. for world model updates, to avoid blocking client message processing
+        private readonly ConcurrentQueue<Action> actionQueue = new();
 
         // representation of world as received from ResoniteLink
         // parsed to a more convenient format for our clients
         private readonly WorldModel worldModel;
+
+        public enum MessageType
+        {
+            Connect = 0,
+            ResoniteData = 1,
+            ClientData = 2
+        }
 
         public SessionManager()
         {
@@ -29,12 +40,9 @@ namespace CalibrationEnv
             // create resonite adaptor,
             // which will handle communication with Resonite world and update world model accordingly
             resoniteAdaptor = new ResoniteAdaptor(worldModel, null);
-
-            // start updating
-            _ = Update();
         }
 
-        private async Task Update()
+        public async Task RunAsync(CancellationToken token)
         {
             // start fleck websocket server to clients
             // clients will subscribe first via port, then send connect msg with client type,
@@ -44,76 +52,92 @@ namespace CalibrationEnv
             {
                 socket.OnOpen = () =>
                 {
-                    lock (clientsLock)
+                    actionQueue.Enqueue(() =>
                     {
                         clients.Add(socket);
-                    }
-
-                    Console.WriteLine($"Client {socket.ConnectionInfo.Id} connected");
+                        Console.WriteLine($"Client {socket.ConnectionInfo.Id} connected");
+                    });
                 };
 
                 socket.OnClose = () =>
                 {
-                    lock (clientsLock)
+                    actionQueue.Enqueue(() =>
                     {
                         clients.Remove(socket);
-                    }
-
-                    Console.WriteLine($"Client {socket.ConnectionInfo.Id} disconnected");
+                        Console.WriteLine($"Client {socket.ConnectionInfo.Id} disconnected");
+                    });
                 };
 
                 socket.OnMessage = msg =>
                 {
-                    Console.WriteLine($"Received from client {socket.ConnectionInfo.Id}: {msg}");
-
-                    // check if connection actually opened
-                    if (!clients.Contains(socket))
+                    actionQueue.Enqueue(() =>
                     {
-                        Console.WriteLine($"Msg from {socket.ConnectionInfo.Id} not processed - client not properly opened yet");
-                        return;
-                    }
+                        Console.WriteLine($"Received from client {socket.ConnectionInfo.Id}: {msg}");
 
-                    // interpret msg as json
-                    using var doc = JsonDocument.Parse(msg);
-                    var root = doc.RootElement;
-
-                    // 0 = connect msg, 1 = data msg
-                    if (root.TryGetProperty("msgType", out var msgType))
-                    {
-                        switch (msgType.GetInt32())
+                        // check if connection actually opened
+                        if (!clients.Contains(socket))
                         {
-                            case 0:
+                            Console.WriteLine($"Msg from {socket.ConnectionInfo.Id} not processed - client not properly opened yet");
+                            return;
+                        }
+
+                        // interpret msg as json
+                        using var doc = JsonDocument.Parse(msg);
+                        var root = doc.RootElement;
+
+                        // check msgType and process accordingly
+                        if (!root.TryGetProperty("msgType", out var msgType))
+                        {
+                            Console.WriteLine($"Msg from {socket.ConnectionInfo.Id} invalid - does not contain 'msgType'. \nMessage: {root.ToString()}");
+                            return;
+                        }
+
+                        if (!Enum.IsDefined(typeof(MessageType), msgType.GetInt32()))
+                        {
+                            Console.WriteLine($"Msg from {socket.ConnectionInfo.Id} invalid - unknown message type {msgType.GetInt32()}");
+                            return;
+                        }
+
+                        var type = (MessageType)msgType.GetInt32();
+                        switch (type)
+                        {
+                            case MessageType.Connect:
                                 ProcessConnectMsg(socket, root);
                                 break;
 
-                            case 1:
+                            case MessageType.ResoniteData:
                                 ProcessDataMsg(socket, root);
+                                break;
+
+                            case MessageType.ClientData:
+                                //ProcessDataMsg(socket, root);
                                 break;
 
                             default:
                                 Console.WriteLine($"Msg from {socket.ConnectionInfo.Id} invalid - unrecognized msgType {msgType}");
                                 break;
                         }
-                    }
-                    else
-                    {
-                        Console.WriteLine($"Msg from {socket.ConnectionInfo.Id} invalid - does not contain 'msgType'. \nMessage: {root.ToString()}");
-                    }
+
+                    });
                 };
             });
 
             Console.WriteLine($"WebSocket server started on ws://0.0.0.0:{clientPort}");
+
+            // process actions from queue until cancellation requested
+            while (!token.IsCancellationRequested)
+            {
+                while (actionQueue.TryDequeue(out var action))
+                {
+                    action();
+                }
+
+                await Task.Delay(1, token);
+            }
         }
 
         private bool ProcessConnectMsg(IWebSocketConnection socket, JsonElement msgRoot)
         {
-            // check if already created adaptor for socket
-            if (adaptors.ContainsKey(socket.ConnectionInfo.Id))
-            {
-                Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} not processed - client already subscribed");
-                return false;
-            }
-
             // check if correct message format
             if (!msgRoot.TryGetProperty("clientType", out var clientType))
             {
@@ -121,9 +145,16 @@ namespace CalibrationEnv
                 return false;
             }
 
-            // create and assign adaptor
+            // check for client type
+            if (clientType.GetString()?.ToLowerInvariant() is not string clientTypeStr)
+            {
+                Console.WriteLine($"Connect msg invalid - clientType null");
+                return false;
+            }
+
+            // create adaptor
             Adaptor? adaptor = null;
-            switch (clientType.GetString()?.ToLower())
+            switch (clientTypeStr)
             {
                 case "unity":
                 case "unreal":
@@ -131,20 +162,28 @@ namespace CalibrationEnv
                     break;
 
                 default:
-                    Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} not succesfully processed - clientType {clientType} isn't supported");
+                    Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} not succesfully processed - clientType {clientTypeStr} isn't supported");
                     break;
             }
 
-            // if succesfully created, add to adaptors
-            if (adaptor != null)
+            // failed to create adaptor for client type, msg and return
+            if (adaptor == null)
             {
-                adaptors.Add(socket.ConnectionInfo.Id, adaptor);
-                Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} processed, adaptor created");
-
-                return true;
+                Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} not processed - failed to create adaptor for clientType {clientTypeStr}");
+                return false;
             }
 
-            return false;
+            // try to add adaptor to adaptors collection
+            if (adaptors.TryAdd(socket.ConnectionInfo.Id, adaptor))
+            {
+                Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} processed, adaptor created");
+                return true;
+            }
+            else
+            {
+                Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} not processed - adaptor for client already subscribed");
+                return false;
+            }
         }
 
         private bool ProcessDataMsg(IWebSocketConnection socket, JsonElement msgRoot)

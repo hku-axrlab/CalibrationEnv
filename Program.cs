@@ -1,10 +1,4 @@
-﻿using Fleck;
-using ResoniteLink;
-using System.Net.WebSockets;
-using System.Text;
-using System.Text.Json;
-
-namespace CalibrationEnv
+﻿namespace CalibrationEnv
 {
     public class Program
     {
@@ -12,10 +6,15 @@ namespace CalibrationEnv
         {
             var sessionManager = new SessionManager();
 
-            while (true)
+            var cts = new CancellationTokenSource();
+
+            Console.CancelKeyPress += (s, e) =>
             {
-                // do nothing? 
-            }
+                e.Cancel = true;
+                cts.Cancel();
+            };
+
+            await sessionManager.RunAsync(cts.Token);
         }
     }
 }

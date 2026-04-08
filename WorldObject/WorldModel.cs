@@ -9,7 +9,7 @@ namespace CalibrationEnv
     {
         // collection of all objects in world, 
         // parsed and represened as WorldObject
-        private List<WorldObject> objects = new List<WorldObject>();
+        private List<WorldObject> objects = [];
 
         JsonElement currentMsg;
 
@@ -18,11 +18,13 @@ namespace CalibrationEnv
             
         }
 
-        public void UpdateWorldModel(JsonElement msg)
+        public void ApplyUpdate(WorldUpdateSource source, JsonElement msg)
         {
             currentMsg = msg;
             // parse the json and update the world model
             // for now, we just store the json message
+        
+            // TODO: see if child was removed from scene, if so remove from collection
         }
 
         public JsonElement? GetWorldModelJson()
