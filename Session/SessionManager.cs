@@ -39,11 +39,14 @@ namespace CalibrationEnv
 
             // create resonite adaptor,
             // which will handle communication with Resonite world and update world model accordingly
-            resoniteAdaptor = new ResoniteAdaptor(worldModel, null);
+            resoniteAdaptor = new ResoniteAdaptor(worldModel);
         }
 
         public async Task RunAsync(CancellationToken token)
         {
+            // start up resonite adaptor to connect to Resonite world 
+            await resoniteAdaptor.StartAsync(token);
+
             // start fleck websocket server to clients
             // clients will subscribe first via port, then send connect msg with client type,
             // after subscribing, they will receive world data messages
@@ -70,7 +73,7 @@ namespace CalibrationEnv
 
                 socket.OnMessage = msg =>
                 {
-                    actionQueue.Enqueue(() =>
+                    actionQueue.Enqueue(async () =>
                     {
                         Console.WriteLine($"Received from client {socket.ConnectionInfo.Id}: {msg}");
 
@@ -102,7 +105,9 @@ namespace CalibrationEnv
                         switch (type)
                         {
                             case MessageType.Connect:
-                                ProcessConnectMsg(socket, root);
+                                var adaptor = ProcessConnectMsg(socket, root);
+                                if (adaptor != null)
+                                    await adaptor.StartAsync(token);
                                 break;
 
                             case MessageType.ResoniteData:
@@ -110,6 +115,8 @@ namespace CalibrationEnv
                                 break;
 
                             case MessageType.ClientData:
+                                // TODO: probably process client data messages differently, 
+                                // but that's an adventure for future me! 
                                 //ProcessDataMsg(socket, root);
                                 break;
 
@@ -136,29 +143,29 @@ namespace CalibrationEnv
             }
         }
 
-        private bool ProcessConnectMsg(IWebSocketConnection socket, JsonElement msgRoot)
+        private ClientAdaptor? ProcessConnectMsg(IWebSocketConnection socket, JsonElement msgRoot)
         {
             // check if correct message format
             if (!msgRoot.TryGetProperty("clientType", out var clientType))
             {
                 Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} invalid - does not contain 'clientType'. \nMessage: {msgRoot.ToString()}");
-                return false;
+                return null;
             }
 
             // check for client type
             if (clientType.GetString()?.ToLowerInvariant() is not string clientTypeStr)
             {
                 Console.WriteLine($"Connect msg invalid - clientType null");
-                return false;
+                return null;
             }
 
             // create adaptor
-            Adaptor? adaptor = null;
+            ClientAdaptor? adaptor = null;
             switch (clientTypeStr)
             {
                 case "unity":
                 case "unreal":
-                    adaptor = new Adaptor(worldModel, socket);
+                    adaptor = new ClientAdaptor(worldModel, socket);
                     break;
 
                 default:
@@ -170,19 +177,19 @@ namespace CalibrationEnv
             if (adaptor == null)
             {
                 Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} not processed - failed to create adaptor for clientType {clientTypeStr}");
-                return false;
+                return null;
             }
 
             // try to add adaptor to adaptors collection
             if (adaptors.TryAdd(socket.ConnectionInfo.Id, adaptor))
             {
                 Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} processed, adaptor created");
-                return true;
+                return adaptor;
             }
             else
             {
                 Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} not processed - adaptor for client already subscribed");
-                return false;
+                return null;
             }
         }
 

@@ -10,7 +10,7 @@ namespace CalibrationEnv
 {
     internal class ResoniteAdaptor : Adaptor
     {
-        private new ClientWebSocket socket;
+        private ClientWebSocket socket;
         private readonly SemaphoreSlim socketLock = new SemaphoreSlim(1, 1);
         
         // pending requests collection, to match responses with requests using message ID
@@ -22,20 +22,17 @@ namespace CalibrationEnv
         private List<string> registeredSlots = new List<string>();
         private readonly object slotsLock = new object();
 
-        public ResoniteAdaptor(WorldModel worldModel, IWebSocketConnection? socket) : base(worldModel, socket)
-        {
-            this.socket = new ClientWebSocket();
+        // interval times for requesting slots, in ms
+        protected readonly int rootMsgInterval = 1000;
+        protected readonly int childMsgInterval = 17;
+        protected override int GetSendInterval() => 17;
 
-            // start updating
-            _ = Send();
+        public ResoniteAdaptor(WorldModel worldModel) : base(worldModel)
+        {
+            socket = new ClientWebSocket();
         }
 
-        public override void Receive(JsonElement msgRoot)
-        {
-            worldModel.ApplyUpdate(WorldUpdateSource.Resonite, msgRoot);
-        }
-
-        protected override async Task Send()
+        public override async Task StartAsync(CancellationToken token)
         {
             // prompt for port to Resonite world
             Console.Write("Enter port number Resonite world: ");
@@ -49,15 +46,43 @@ namespace CalibrationEnv
             await socket.ConnectAsync(new Uri($"ws://localhost:{resonitePort}"), CancellationToken.None);
             Console.WriteLine("Connected to Resonite world!");
 
-            // start tasks to get, process and forward Root and childern slots
-            await Task.WhenAll(ReceiveLoop(), GetRootLoop(), GetChildernLoop());
+            // call base, should return instantly
+            await base.StartAsync(token);
+
+            // fire tasks, run completely as background task on threadpool
+            _ = Task.Run(() => ReceiveLoop(token), token);
+            _ = Task.Run(() => GetRootLoop(token), token);
+            _ = Task.Run(() => GetChildrenLoop(token), token);
         }
 
-        private async Task ReceiveLoop()
+        public override void Receive(JsonElement msgRoot)
         {
+            worldModel.ApplyUpdate(WorldUpdateSource.Resonite, msgRoot);
+        }
+
+        protected override Task SendStep()
+        {
+            // TODO: not sure how to handle world updates -> Resonite
+            // possible idea below - keep track of commands/special objects?
+            // commands would be send by clients?
+
+            // send queued client inputs to Resonite
+            //var commands = worldModel.ConsumeOutgoingCommands();
+
+            //foreach (var cmd in commands)
+            //{
+            //    await SendToResonite(cmd);
+            //}
+
+            return Task.CompletedTask;
+        }
+
+        private async Task ReceiveLoop(CancellationToken token)
+        {
+            // TODO: improve so buffers can't/won't overload
             var buffer = new byte[8192];
 
-            while (true)
+            while (!token.IsCancellationRequested)
             {
                 // receive full message from Resonite world, which might come in multiple frames,
                 // and combine to single string msg
@@ -66,7 +91,7 @@ namespace CalibrationEnv
                 WebSocketReceiveResult result;
                 do
                 {
-                    result = await socket.ReceiveAsync(segment, CancellationToken.None);
+                    result = await socket.ReceiveAsync(segment, token);
                     ms.Write(buffer, 0, result.Count);
                 } while (!result.EndOfMessage);
 
@@ -95,9 +120,9 @@ namespace CalibrationEnv
             }
         }
 
-        private async Task GetRootLoop()
+        private async Task GetRootLoop(CancellationToken token)
         {
-            while (true)
+            while (!token.IsCancellationRequested)
             {
                 // get Root slot data 
                 var msg = BuildGetSlotMsg("Root", false);
@@ -139,13 +164,13 @@ namespace CalibrationEnv
                 }
 
                 // wait 
-                await Task.Delay(rootMsgInterval);
+                await Task.Delay(rootMsgInterval, token);
             }
         }
 
-        private async Task GetChildernLoop()
+        private async Task GetChildrenLoop(CancellationToken token)
         {
-            while (true)
+            while (!token.IsCancellationRequested)
             {
                 // get a copy of the current registered slots to do batch operation on
                 List<string> snapshotRegisteredSlots;
@@ -179,7 +204,7 @@ namespace CalibrationEnv
                 Receive(jsonRoot);
 
                 // wait
-                await Task.Delay(childMsgInterval);
+                await Task.Delay(childMsgInterval, token);
             }
         }
 

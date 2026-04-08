@@ -9,61 +9,58 @@ namespace CalibrationEnv
         Client
     }
 
-    internal class Adaptor
+    internal abstract class Adaptor
     {
         // reference to world model to obtain world data 
-        protected WorldModel worldModel;
+        protected readonly WorldModel worldModel;
 
-        // reference to connected socket
-        protected IWebSocketConnection? socket;
-
-        // interval times for requesting slots, in ms
-        protected int rootMsgInterval = 1000;
-        protected int childMsgInterval = 17;
-
-        public Adaptor(WorldModel worldModel, IWebSocketConnection? socket)
+        public Adaptor(WorldModel worldModel)
         {
             this.worldModel = worldModel;
-            this.socket = socket;
         }
+
+        /// <summary>
+        /// Starts async loop to send messages to client on interval. 
+        /// </summary>
+        /// <param name="token"></param>
+        /// <returns></returns>
+        public virtual Task StartAsync(CancellationToken token)
+        {
+            Task.Run(() => RunSendLoop(token), token);
+
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Runs async on interval client wants to receive messages.
+        /// Messages contain current world model data and 
+        /// are sent to the client matching the socket.
+        /// </summary>
+        private async Task RunSendLoop(CancellationToken token) 
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    await SendStep();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"SendLoop error: {ex.Message}");
+                }
+
+                await Task.Delay(GetSendInterval(), token);
+            }
+        }
+
+        protected abstract Task SendStep();
+        protected abstract int GetSendInterval();
 
         /// <summary>
         /// Called when receiving msg from client. 
         /// Processes message and update world model accordingly.
         /// </summary>
         /// <param name="msgRoot">JSONElement containing the root of the message.</param>
-        public virtual void Receive(JsonElement msgRoot)
-        {
-            worldModel.ApplyUpdate(WorldUpdateSource.Client, msgRoot);
-            Console.WriteLine($"Client {socket?.ConnectionInfo.Id} send msg, succesfully received: {msgRoot.ToString()}");
-        }
-
-        /// <summary>
-        /// Called when client wants to receive a message,
-        /// containing current world model data and 
-        /// is send to the client matching the socket.
-        /// </summary>
-        protected virtual async Task Send()
-        {
-            while (true)
-            {
-                try
-                {
-                    if (socket != null && socket.IsAvailable)
-                    {
-                        await socket.Send(worldModel.GetWorldModelJson()?.ToString());
-                    }
-
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Error sending message to client, scheduling removal: {ex.Message}");
-                    // TODO: somehow remove from session manager adaptors and clients collections,
-                    // to avoid trying to send to this socket again
-                }
-
-                await Task.Delay(childMsgInterval);
-            }
-        }
+        public abstract void Receive(JsonElement msgRoot);
     }
 }
