@@ -1,7 +1,5 @@
-﻿using Fleck;
-using ResoniteLink;
-using System;
-using System.Collections.Generic;
+﻿using ResoniteLink;
+using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -14,17 +12,11 @@ namespace CalibrationEnv
         private readonly SemaphoreSlim socketLock = new SemaphoreSlim(1, 1);
         
         // pending requests collection, to match responses with requests using message ID
-        private readonly Dictionary<string, TaskCompletionSource<string>> pendingRequests = new Dictionary<string, TaskCompletionSource<string>>();
-        private readonly object pendingLock = new object();
-
-        // registered slot collection, to keep track of discovered slot ID's from Root slot,
-        // and request data on those in batch, only interested in tagged slots
-        private List<string> registeredSlots = new List<string>();
-        private readonly object slotsLock = new object();
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<string>> pendingRequests = [];
 
         // interval times for requesting slots, in ms
-        protected readonly int rootMsgInterval = 1000;
-        protected readonly int childMsgInterval = 17;
+        protected readonly int rootMsgInterval = 10000;//1000;
+        protected readonly int childMsgInterval = 5000;//17;
         protected override int GetSendInterval() => 17;
 
         public ResoniteAdaptor(WorldModel worldModel) : base(worldModel)
@@ -101,16 +93,13 @@ namespace CalibrationEnv
                 string? msgId = ExtractMessageID(msg);
                 TaskCompletionSource<string>? tcs = null;
 
-                lock (pendingLock)
+                if (msgId != null && pendingRequests.TryGetValue(msgId, out tcs))
                 {
-                    if (msgId != null && pendingRequests.TryGetValue(msgId, out tcs))
-                    {
-                        pendingRequests.Remove(msgId);
-                    }
-                    else
-                    {
-                        Console.WriteLine("Received untracked message: " + msg);
-                    }
+                    pendingRequests.TryRemove(msgId, out var removed);
+                }
+                else
+                {
+                    Console.WriteLine("Received untracked message: " + msg);
                 }
 
                 if (tcs != null)
@@ -130,37 +119,36 @@ namespace CalibrationEnv
 
                 // process response to extract child ID's and add to registered slots collection,
                 // which will be used to request childern slot data in batch
-                lock (slotsLock)
+                // get response as JSONElement 
+                var jsonRoot = JsonDocument.Parse(response).RootElement;
+
+                // error handling 
+                if (!CheckJSONResponse(jsonRoot, "slotData"))
+                    return;
+
+                Console.WriteLine("\nReceived Root response with ID: " + jsonRoot.GetProperty("sourceMessageId"));
+
+                // get core data 
+                var data = jsonRoot.GetProperty("data");
+
+                // get ID's from all children, 
+                // add to collection if not yet discovered
+                var children = data.GetProperty("children").EnumerateArray();
+
+                Console.WriteLine("Data from Root response: " + children.ToList().Count + " children.\n" + data);
+
+                foreach (var child in children)
                 {
-                    // get response as JSONElement 
-                    var jsonRoot = JsonDocument.Parse(response).RootElement;
+                    // add child id to registered slots
+                    // but only interesseted in tagged childern
+                    var childID = child.GetProperty("id").GetString()!;
+                    var childTag = child.GetProperty("tag").GetProperty("value").GetString();
 
-                    // error handling 
-                    if (!CheckJSONResponse(jsonRoot, "slotData"))
-                        return;
+                    if (string.IsNullOrEmpty(childTag) || string.IsNullOrEmpty(childID))
+                        continue;
 
-                    Console.WriteLine("\nReceived Root response with ID: " + jsonRoot.GetProperty("sourceMessageId"));
-
-                    // get core data 
-                    var data = jsonRoot.GetProperty("data");
-
-                    // get ID's from all children, 
-                    // add to collection if not yet discovered
-                    var children = data.GetProperty("children").EnumerateArray();
-
-                    foreach (var child in children)
-                    {
-                        // add child id to registered slots
-                        // but only interesseted in tagged childern
-                        var childID = child.GetProperty("id").GetString()!;
-                        var childTag = child.GetProperty("tag").GetProperty("value").GetString();
-
-                        if (string.IsNullOrEmpty(childTag))
-                            continue;
-
-                        if (!registeredSlots.Contains(childID))
-                            registeredSlots.Add(childID);
-                    }
+                    if (!worldModel.ContainsObject(childID))
+                        worldModel.AddObjectID(childID);
                 }
 
                 // wait 
@@ -173,11 +161,7 @@ namespace CalibrationEnv
             while (!token.IsCancellationRequested)
             {
                 // get a copy of the current registered slots to do batch operation on
-                List<string> snapshotRegisteredSlots;
-                lock (slotsLock)
-                {
-                    snapshotRegisteredSlots = registeredSlots.ToList();
-                }
+                List<string> snapshotRegisteredSlots = worldModel.GetObjectKeysSnapshot();
 
                 // do batch operation: get slot on all registered id's
                 var batchMsg = new DataModelOperationBatch();
@@ -197,6 +181,7 @@ namespace CalibrationEnv
                 
                 var responses = jsonRoot.GetProperty("responses");
 
+                Console.WriteLine("Data from Batch response: " + responses);
                 // error handling 
                 if (!CheckJSONResponse(jsonRoot, "batchResponse"))
                     return;
@@ -228,10 +213,7 @@ namespace CalibrationEnv
         private async Task<string> SendRequestAsync(Message msg, string type)
         {
             var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            lock (pendingLock)
-            {
-                pendingRequests[msg.MessageID] = tcs;
-            }
+            pendingRequests[msg.MessageID] = tcs;
 
             byte[] bytes = GetMsgAsByteArray(msg, type);
 
@@ -250,11 +232,7 @@ namespace CalibrationEnv
 
             if (completed != tcs.Task)
             {
-                lock (pendingLock)
-                {
-                    pendingRequests.Remove(msg.MessageID);
-                }
-
+                pendingRequests.TryRemove(msg.MessageID, out var removed);
                 throw new TimeoutException("No response received");
             }
 
