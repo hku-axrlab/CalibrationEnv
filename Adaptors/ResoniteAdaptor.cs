@@ -4,6 +4,7 @@ using System.Net.WebSockets;
 using System.Numerics;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace CalibrationEnv
 {
@@ -11,9 +12,14 @@ namespace CalibrationEnv
     {
         private ClientWebSocket socket;
         private readonly SemaphoreSlim socketLock = new SemaphoreSlim(1, 1);
-        
+
         // pending requests collection, to match responses with requests using message ID
         private readonly ConcurrentDictionary<string, TaskCompletionSource<string>> pendingRequests = [];
+
+        // registered slot collection, to keep track of discovered slot ID's from Root slot,
+        // and request data on those in batch, only interested in tagged slots
+        private readonly List<string> registeredSlots = [];
+        private readonly object slotsLock = new();
 
         // interval times for requesting slots, in ms
         protected readonly int rootMsgInterval = 10000;//1000;
@@ -52,15 +58,15 @@ namespace CalibrationEnv
 
         public override void Receive(JsonElement msgRoot)
         {
-            WorldUpdate update = new WorldUpdate();
+            WorldUpdate update = new();
 
-			JsonElement responses = msgRoot.GetProperty("responses");
+            JsonElement responses = msgRoot.GetProperty("responses");
             foreach (JsonElement slotNode in responses.EnumerateArray())
             {
                 ParseSlot(slotNode, ref update);
-			}
+            }
 
-		    worldModel.ApplyUpdate(WorldUpdateSource.Resonite, update);
+            worldModel.ApplyUpdate(WorldUpdateSource.Resonite, update);
         }
 
         protected override Task SendStep()
@@ -133,6 +139,7 @@ namespace CalibrationEnv
 
                 // process response to extract child ID's and add to registered slots collection,
                 // which will be used to request childern slot data in batch
+
                 // get response as JSONElement 
                 var jsonRoot = JsonDocument.Parse(response).RootElement;
 
@@ -150,19 +157,23 @@ namespace CalibrationEnv
                 var children = data.GetProperty("children").EnumerateArray();
 
                 Console.WriteLine("Data from Root response: " + children.ToList().Count + " children.\n" + data);
-
-                foreach (var child in children)
+                
+                // lock slots to check and add new slots if found
+                lock (slotsLock)
                 {
-                    // add child id to registered slots
-                    // but only interesseted in tagged childern
-                    var childID = child.GetProperty("id").GetString()!;
-                    var childTag = child.GetProperty("tag").GetProperty("value").GetString();
+                    foreach (var child in children)
+                    {
+                        // add child id to registered slots
+                        // but only interesseted in tagged childern
+                        var childID = child.GetProperty("id").GetString()!;
+                        var childTag = child.GetProperty("tag").GetProperty("value").GetString();
 
-                    if (string.IsNullOrEmpty(childTag) || string.IsNullOrEmpty(childID))
-                        continue;
+                        if (string.IsNullOrEmpty(childTag) || string.IsNullOrEmpty(childID))
+                            continue;
 
-                    if (!worldModel.ContainsObject(childID))
-                        worldModel.AddObjectID(childID);
+                        if (!registeredSlots.Contains(childID))
+                            registeredSlots.Add(childID);
+                    }
                 }
 
                 // wait 
@@ -177,8 +188,10 @@ namespace CalibrationEnv
                 DateTime start = DateTime.Now;
 
                 // get a copy of the current registered slots to do batch operation on
-                List<string> snapshotRegisteredSlots = worldModel.GetObjectKeysSnapshot();
-
+                List<string> snapshotRegisteredSlots;
+                lock (slotsLock)
+                    snapshotRegisteredSlots = [.. registeredSlots];
+                
                 // do batch operation: get slot on all registered id's
                 var batchMsg = new DataModelOperationBatch();
                 batchMsg.MessageID = Guid.NewGuid().ToString();
@@ -194,10 +207,11 @@ namespace CalibrationEnv
                 // get to core data from msg
                 var jsonRoot = JsonDocument.Parse(response).RootElement;
                 // Console.WriteLine("\nReceived Batch children response with ID: " + jsonRoot.GetProperty("sourceMessageId"));
-                
+
                 var responses = jsonRoot.GetProperty("responses");
 
                 Console.WriteLine("Data from Batch response: " + responses);
+
                 // error handling 
                 if (!CheckJSONResponse(jsonRoot, "batchResponse"))
                     return;
@@ -207,8 +221,8 @@ namespace CalibrationEnv
                 // Make sure we account for the time the request took, so we don't introduce unnecessary delay
                 TimeSpan spent = DateTime.Now - start;
 
-				// wait for childMsgInterval minus time spent here
-				await Task.Delay(Math.Max(childMsgInterval - (int)spent.TotalMilliseconds, 0), token);
+                // wait for childMsgInterval minus time spent here
+                await Task.Delay(Math.Max(childMsgInterval - (int)spent.TotalMilliseconds, 0), token);
             }
         }
 
@@ -298,22 +312,60 @@ namespace CalibrationEnv
 
         private void ParseSlot(JsonElement slotNode, ref WorldUpdate worldUpdate)
         {
-            WorldObject worldObject = new WorldObject();
+            WorldObject worldObject = new();
+
+            // check if object was removed,
+            // which is determined by data element's value being null 
+            // additionally succes will be false, errorInfo will contain deleted slot id
+            var dataElement = slotNode.GetProperty("data");
+            if (dataElement.ValueKind == JsonValueKind.Null)
+            {
+                // check for error msg
+                var errorToken = slotNode.TryGetProperty("errorInfo", out var errorProp) ? errorProp.GetString() : null;
+                if(errorToken == null)
+                {
+                    Console.WriteLine("Bad GetSlot response, can't determine requested id or data. Node: " + slotNode.ToString());
+                    return;
+                }
+
+                // attempt to get id from error msg
+                // example msg: "Slot with ID 'Reso_11F' not found."
+                var match = Regex.Match(errorToken, @"'(?<id>Reso_[^']+)'");
+                if (!match.Success)
+                {
+                    Console.WriteLine("Bad GetSlot response, can't determine requested id or data. Node: " + slotNode.ToString());
+                    return;
+                }
+
+                // set field world object 
+                worldObject.id = match.Groups["id"].Value;
+                worldObject.markedForRemoval = true;
+
+                // remove from registered slots so we stop requesting updates  
+                lock (slotsLock)
+                    registeredSlots.Remove(worldObject.id);
+
+                // do still add to the update, 
+                // since removing the object is in fact an update! 
+                worldUpdate.objects.Add(worldObject);
+
+                return;
+            }
 
             // Grab data from slot
-            var id = slotNode.GetProperty("data").TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
-            var nameToken = slotNode.GetProperty("data").TryGetProperty("name", out var nameProp) && nameProp.TryGetProperty("value", out var nameVal) ? nameVal.GetString() : null;
-            var tagToken = slotNode.GetProperty("data").TryGetProperty("tag", out var tagProp) && tagProp.TryGetProperty("value", out var tagVal) ? tagVal : (JsonElement?)null;
-            var posToken = slotNode.GetProperty("data").TryGetProperty("position", out var posProp) && posProp.TryGetProperty("value", out var posVal) ? posVal : (JsonElement?)null;
-            var rotToken = slotNode.GetProperty("data").TryGetProperty("rotation", out var rotProp) && rotProp.TryGetProperty("value", out var rotVal) ? rotVal : (JsonElement?)null;
-            var scaleToken = slotNode.GetProperty("data").TryGetProperty("scale", out var scaleProp) && scaleProp.TryGetProperty("value", out var scaleVal) ? scaleVal : (JsonElement?)null;
+            var id = dataElement.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+            var nameToken = dataElement.TryGetProperty("name", out var nameProp) && nameProp.TryGetProperty("value", out var nameVal) ? nameVal.GetString() : null;
+            var tagToken = dataElement.TryGetProperty("tag", out var tagProp) && tagProp.TryGetProperty("value", out var tagVal) ? tagVal : (JsonElement?)null;
+            var posToken = dataElement.TryGetProperty("position", out var posProp) && posProp.TryGetProperty("value", out var posVal) ? posVal : (JsonElement?)null;
+            var rotToken = dataElement.TryGetProperty("rotation", out var rotProp) && rotProp.TryGetProperty("value", out var rotVal) ? rotVal : (JsonElement?)null;
+            var scaleToken = dataElement.TryGetProperty("scale", out var scaleProp) && scaleProp.TryGetProperty("value", out var scaleVal) ? scaleVal : (JsonElement?)null;
 
             // Skip if no id and/or tag
             var tagValue = tagToken?.GetString() ?? "Untagged";
             if (id != "Root" && (id == null || string.IsNullOrEmpty(tagValue))) return;
 
             // Process transform
-            Transform transform = new Transform();
+            Transform transform = new();
             Vector3 position;
             Quaternion rotation;
             Vector3 scale;
@@ -346,43 +398,41 @@ namespace CalibrationEnv
                 transform.scale = scale;
             }
 
-            
-
             // Process components for variable data
             List<DataContainer> data = new List<DataContainer>();
-            JsonElement components = slotNode.GetProperty("data").GetProperty("components");
+            JsonElement components = dataElement.GetProperty("components");
             foreach (JsonElement component in components.EnumerateArray())
             {
-				//slotNode.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
-				var type = component.GetProperty("componentType").GetString();
-                if ( type.Contains("DynamicValueVariable<"))
+                //slotNode.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+                var type = component.GetProperty("componentType").GetString();
+                if (type.Contains("DynamicValueVariable<"))
                 {
                     JsonElement members = component.GetProperty("members");
 
-					// Get the variable from the template <>
-					int start = type.IndexOf("<");
-					int end = type.IndexOf(">");
-					string? inner = (start != -1 && end != -1 && end > start) ? type.Substring(start + 1, end - start - 1) : null;
+                    // Get the variable from the template <>
+                    int start = type.IndexOf("<");
+                    int end = type.IndexOf(">");
+                    string? inner = (start != -1 && end != -1 && end > start) ? type.Substring(start + 1, end - start - 1) : null;
 
-					string varType = inner == null ? "" : inner;
-					string? varName = members.GetProperty("VariableName").GetProperty("value").GetString();
-					JsonElement varValue = members.GetProperty("Value");
+                    string varType = inner == null ? "" : inner;
+                    string? varName = members.GetProperty("VariableName").GetProperty("value").GetString();
+                    JsonElement varValue = members.GetProperty("Value");
 
-                    if ( varName == null) continue;
+                    if (varName == null) continue;
 
                     data.Add(new DataContainer(varType, varName, varValue));
-				}
-			}
+                }
+            }
 
             worldObject.id = id;
             worldObject.tag = tagValue;
-			worldObject.name = nameToken == null ? "no_name" : nameToken;
-			worldObject.home = guid;
-			worldObject.transform = transform;
+            worldObject.name = nameToken == null ? "no_name" : nameToken;
+            worldObject.home = guid;
+            worldObject.transform = transform;
             worldObject.data = data.ToArray();
 
-			worldUpdate.objects.Add(worldObject);
-		}
-		#endregion
-	}
+            worldUpdate.objects.Add(worldObject);
+        }
+        #endregion
+    }
 }

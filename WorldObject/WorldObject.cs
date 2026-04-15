@@ -17,6 +17,8 @@ namespace CalibrationEnv
         public Transform transform;
         public DataContainer[]? data;
 
+        public bool markedForRemoval = false;
+
         public WorldObject()
         {
             id = "";
@@ -24,6 +26,7 @@ namespace CalibrationEnv
             name = "";
             home = "";
             transform = new Transform();
+            markedForRemoval = false;
         }
 
 		public void ApplyFrom(WorldObject other)
@@ -31,6 +34,8 @@ namespace CalibrationEnv
             transform = other.transform;
 			// Check if this is slow or not... might want to more efficiently copy data
 			data = other.data;
+
+            markedForRemoval = other.markedForRemoval;
         }
     }
 
