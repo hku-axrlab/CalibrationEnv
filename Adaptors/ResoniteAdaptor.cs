@@ -33,17 +33,47 @@ namespace CalibrationEnv
 
         public override async Task StartAsync(CancellationToken token)
         {
-            // prompt for port to Resonite world
-            Console.Write("Enter port number Resonite world: ");
-            string? input = Console.ReadLine();
-            if (!uint.TryParse(input, out uint resonitePort))
-            {
-                Console.WriteLine("Invalid port number.");
-            }
+            uint resonitePort;
 
-            // open socket connection to Resonite world
-            await socket.ConnectAsync(new Uri($"ws://localhost:{resonitePort}"), CancellationToken.None);
-            Console.WriteLine("Connected to Resonite world!");
+            while (true)
+            {
+                // prompt for port to Resonite world
+                Console.Write("Enter port number Resonite world: ");
+                var input = Console.ReadLine();
+                if (!uint.TryParse(input, out resonitePort))
+                {
+                    Console.WriteLine("Invalid port number.\n");
+                    continue;
+                }
+
+                // create new socket per attempt
+                // since it's probably broken/disposed after failed attempt
+                socket?.Dispose();
+                socket = new ClientWebSocket();
+
+                // attempt connect with timeout
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                cts.CancelAfter(TimeSpan.FromSeconds(5));
+
+                try
+                {
+                    await socket.ConnectAsync(
+                        new Uri($"ws://localhost:{resonitePort}"),
+                        cts.Token
+                    );
+
+                    Console.WriteLine("Connected to Resonite world!");
+                    break;
+                }
+                catch (OperationCanceledException)
+                {
+                    Console.WriteLine("Connection timed out.\n");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Connection failed: {ex.Message}\n");
+                }
+            }
 
             guid = GenerateId("resonite", "127.0.0.1", resonitePort);
 

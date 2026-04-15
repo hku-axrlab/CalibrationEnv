@@ -16,7 +16,7 @@ namespace CalibrationEnv
         public ClientAdaptor(WorldModel worldModel, IWebSocketConnection? socket, string type ) : base(worldModel)
         {
             this.socket = socket;
-            if ( socket != null )
+            if (socket != null)
                 this.guid = GenerateId(type, socket.ConnectionInfo.ClientIpAddress, (uint)socket.ConnectionInfo.ClientPort);
 		}
 
