@@ -18,13 +18,15 @@ namespace CalibrationEnv
 
         // registered slot collection, to keep track of discovered slot ID's from Root slot,
         // and request data on those in batch, only interested in tagged slots
-        private readonly List<string> registeredSlots = [];
-        private readonly object slotsLock = new();
+        private readonly ConcurrentDictionary<string, byte> registeredSlots = [];       // byte value always 0, just wanted to ConcurrentDic pattern
 
         // interval times for requesting slots, in ms
-        protected readonly int rootMsgInterval = 10000;//1000;
-        protected readonly int childMsgInterval = 5000;//17;
+        protected readonly int rootMsgInterval = 1000;
+        protected readonly int childMsgInterval = 17;
         protected override int GetSendInterval() => 17;
+
+        private const int MAX_MESSAGE_SIZE = 1024 * 1024; // 1 MB
+        private const int BUFFER_SIZE = 8192;
 
         public ResoniteAdaptor(WorldModel worldModel) : base(worldModel)
         {
@@ -121,23 +123,28 @@ namespace CalibrationEnv
 
         private async Task ReceiveLoop(CancellationToken token)
         {
-            // TODO: improve so buffers can't/won't overload
-            var buffer = new byte[8192];
+            var buffer = new byte[BUFFER_SIZE];
 
             while (!token.IsCancellationRequested)
             {
-                // receive full message from Resonite world, which might come in multiple frames,
-                // and combine to single string msg
-                var segment = new ArraySegment<byte>(buffer);
+                // get message by writing to memorystream as long
+                // as required to receive complete msg 
                 using var ms = new MemoryStream();
                 WebSocketReceiveResult result;
                 do
                 {
-                    result = await socket.ReceiveAsync(segment, token);
+                    result = await socket.ReceiveAsync(buffer, token);
+
+                    if (result.MessageType == WebSocketMessageType.Close)
+                        return;
+
                     ms.Write(buffer, 0, result.Count);
+
+                    if (ms.Length > MAX_MESSAGE_SIZE)
+                        throw new InvalidOperationException("WebSocket message too large");
                 } while (!result.EndOfMessage);
 
-                string msg = Encoding.UTF8.GetString(ms.ToArray());
+                string msg = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
 
                 // extract message ID from JSON and add to pending requests
                 string? msgId = ExtractMessageID(msg);
@@ -145,7 +152,7 @@ namespace CalibrationEnv
 
                 if (msgId != null && pendingRequests.TryGetValue(msgId, out tcs))
                 {
-                    pendingRequests.TryRemove(msgId, out var removed);
+                    pendingRequests.TryRemove(msgId, out _);
                 }
                 else
                 {
@@ -177,7 +184,7 @@ namespace CalibrationEnv
                 if (!CheckJSONResponse(jsonRoot, "slotData"))
                     return;
 
-                Console.WriteLine("\nReceived Root response with ID: " + jsonRoot.GetProperty("sourceMessageId"));
+                //Console.WriteLine("\nReceived Root response with ID: " + jsonRoot.GetProperty("sourceMessageId"));
 
                 // get core data 
                 var data = jsonRoot.GetProperty("data");
@@ -186,24 +193,20 @@ namespace CalibrationEnv
                 // add to collection if not yet discovered
                 var children = data.GetProperty("children").EnumerateArray();
 
-                Console.WriteLine("Data from Root response: " + children.ToList().Count + " children.\n" + data);
-                
-                // lock slots to check and add new slots if found
-                lock (slotsLock)
+                //Console.WriteLine("Data from Root response: " + children.ToList().Count + " children.\n" + data);
+
+                // check and add new slots if found
+                foreach (var child in children)
                 {
-                    foreach (var child in children)
-                    {
-                        // add child id to registered slots
-                        // but only interesseted in tagged childern
-                        var childID = child.GetProperty("id").GetString()!;
-                        var childTag = child.GetProperty("tag").GetProperty("value").GetString();
+                    // add child id to registered slots
+                    // but only interesseted in tagged childern
+                    var childID = child.GetProperty("id").GetString()!;
+                    var childTag = child.GetProperty("tag").GetProperty("value").GetString();
 
-                        if (string.IsNullOrEmpty(childTag) || string.IsNullOrEmpty(childID))
-                            continue;
+                    if (string.IsNullOrEmpty(childTag) || string.IsNullOrEmpty(childID))
+                        continue;
 
-                        if (!registeredSlots.Contains(childID))
-                            registeredSlots.Add(childID);
-                    }
+                    registeredSlots.TryAdd(childID, 0);
                 }
 
                 // wait 
@@ -219,8 +222,7 @@ namespace CalibrationEnv
 
                 // get a copy of the current registered slots to do batch operation on
                 List<string> snapshotRegisteredSlots;
-                lock (slotsLock)
-                    snapshotRegisteredSlots = [.. registeredSlots];
+                snapshotRegisteredSlots = [.. registeredSlots.Keys];
                 
                 // do batch operation: get slot on all registered id's
                 var batchMsg = new DataModelOperationBatch();
@@ -240,7 +242,7 @@ namespace CalibrationEnv
 
                 var responses = jsonRoot.GetProperty("responses");
 
-                Console.WriteLine("Data from Batch response: " + responses);
+                //Console.WriteLine("Data from Batch response: " + responses);
 
                 // error handling 
                 if (!CheckJSONResponse(jsonRoot, "batchResponse"))
@@ -295,7 +297,7 @@ namespace CalibrationEnv
 
             if (completed != tcs.Task)
             {
-                pendingRequests.TryRemove(msg.MessageID, out var removed);
+                pendingRequests.TryRemove(msg.MessageID, out _);
                 throw new TimeoutException("No response received");
             }
 
@@ -372,8 +374,7 @@ namespace CalibrationEnv
                 worldObject.markedForRemoval = true;
 
                 // remove from registered slots so we stop requesting updates  
-                lock (slotsLock)
-                    registeredSlots.Remove(worldObject.id);
+                registeredSlots.TryRemove(worldObject.id, out _);
 
                 // do still add to the update, 
                 // since removing the object is in fact an update! 
