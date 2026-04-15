@@ -165,9 +165,8 @@ namespace CalibrationEnv
             {
                 case "unity":
                 case "unreal":
-                    adaptor = new ClientAdaptor(worldModel, socket);
-                    break;
-
+					adaptor = new ClientAdaptor(worldModel, socket, clientTypeStr);
+					break;
                 default:
                     Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} not succesfully processed - clientType {clientTypeStr} isn't supported");
                     break;

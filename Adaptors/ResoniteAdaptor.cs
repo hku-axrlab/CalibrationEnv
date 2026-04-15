@@ -1,8 +1,7 @@
-﻿using Fleck;
-using ResoniteLink;
-using System;
-using System.Collections.Generic;
+﻿using ResoniteLink;
+using System.Collections;
 using System.Net.WebSockets;
+using System.Numerics;
 using System.Text;
 using System.Text.Json;
 
@@ -46,6 +45,8 @@ namespace CalibrationEnv
             await socket.ConnectAsync(new Uri($"ws://localhost:{resonitePort}"), CancellationToken.None);
             Console.WriteLine("Connected to Resonite world!");
 
+            guid = GenerateId("resonite", "127.0.0.1", resonitePort);
+
             // call base, should return instantly
             await base.StartAsync(token);
 
@@ -57,7 +58,15 @@ namespace CalibrationEnv
 
         public override void Receive(JsonElement msgRoot)
         {
-            worldModel.ApplyUpdate(WorldUpdateSource.Resonite, msgRoot);
+            WorldUpdate update = new WorldUpdate();
+
+			JsonElement responses = msgRoot.GetProperty("responses");
+            foreach (JsonElement slotNode in responses.EnumerateArray())
+            {
+                ParseSlot(slotNode, ref update);
+			}
+
+		    worldModel.ApplyUpdate(WorldUpdateSource.Resonite, update);
         }
 
         protected override Task SendStep()
@@ -65,6 +74,9 @@ namespace CalibrationEnv
             // TODO: not sure how to handle world updates -> Resonite
             // possible idea below - keep track of commands/special objects?
             // commands would be send by clients?
+
+            // First only send non-resonite users
+            // Later send non-resonite Objects too
 
             // send queued client inputs to Resonite
             //var commands = worldModel.ConsumeOutgoingCommands();
@@ -172,6 +184,8 @@ namespace CalibrationEnv
         {
             while (!token.IsCancellationRequested)
             {
+                DateTime start = DateTime.Now;
+
                 // get a copy of the current registered slots to do batch operation on
                 List<string> snapshotRegisteredSlots;
                 lock (slotsLock)
@@ -193,7 +207,7 @@ namespace CalibrationEnv
 
                 // get to core data from msg
                 var jsonRoot = JsonDocument.Parse(response).RootElement;
-                Console.WriteLine("\nReceived Batch children response with ID: " + jsonRoot.GetProperty("sourceMessageId"));
+                // Console.WriteLine("\nReceived Batch children response with ID: " + jsonRoot.GetProperty("sourceMessageId"));
                 
                 var responses = jsonRoot.GetProperty("responses");
 
@@ -203,8 +217,11 @@ namespace CalibrationEnv
 
                 Receive(jsonRoot);
 
-                // wait
-                await Task.Delay(childMsgInterval, token);
+                // Make sure we account for the time the request took, so we don't introduce unnecessary delay
+                TimeSpan spent = DateTime.Now - start;
+
+				// wait for childMsgInterval minus time spent here
+				await Task.Delay(Math.Max(childMsgInterval - (int)spent.TotalMilliseconds, 0), token);
             }
         }
 
@@ -298,6 +315,94 @@ namespace CalibrationEnv
 
             return true;
         }
-        #endregion
-    }
+
+        private void ParseSlot(JsonElement slotNode, ref WorldUpdate worldUpdate)
+        {
+            WorldObject worldObject = new WorldObject();
+
+            // Grab data from slot
+            var id = slotNode.GetProperty("data").TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+            var nameToken = slotNode.GetProperty("data").TryGetProperty("name", out var nameProp) && nameProp.TryGetProperty("value", out var nameVal) ? nameVal.GetString() : null;
+            var tagToken = slotNode.GetProperty("data").TryGetProperty("tag", out var tagProp) && tagProp.TryGetProperty("value", out var tagVal) ? tagVal : (JsonElement?)null;
+            var posToken = slotNode.GetProperty("data").TryGetProperty("position", out var posProp) && posProp.TryGetProperty("value", out var posVal) ? posVal : (JsonElement?)null;
+            var rotToken = slotNode.GetProperty("data").TryGetProperty("rotation", out var rotProp) && rotProp.TryGetProperty("value", out var rotVal) ? rotVal : (JsonElement?)null;
+            var scaleToken = slotNode.GetProperty("data").TryGetProperty("scale", out var scaleProp) && scaleProp.TryGetProperty("value", out var scaleVal) ? scaleVal : (JsonElement?)null;
+
+            // Skip if no id and/or tag
+            var tagValue = tagToken?.GetString() ?? "Untagged";
+            if (id != "Root" && (id == null || string.IsNullOrEmpty(tagValue))) return;
+
+            // Process transform
+            Transform transform = new Transform();
+            Vector3 position;
+            Quaternion rotation;
+            Vector3 scale;
+
+            if (posToken.HasValue)
+            {
+                float x = posToken.Value.TryGetProperty("x", out var px) ? px.GetSingle() : 0f;
+                float y = posToken.Value.TryGetProperty("y", out var py) ? py.GetSingle() : 0f;
+                float z = posToken.Value.TryGetProperty("z", out var pz) ? pz.GetSingle() : 0f;
+                position = new Vector3(x, y, z);
+                transform.position = position;
+            }
+
+            if (rotToken.HasValue)
+            {
+                float x = rotToken.Value.TryGetProperty("x", out var rx) ? rx.GetSingle() : 0f;
+                float y = rotToken.Value.TryGetProperty("y", out var ry) ? ry.GetSingle() : 0f;
+                float z = rotToken.Value.TryGetProperty("z", out var rz) ? rz.GetSingle() : 0f;
+                float w = rotToken.Value.TryGetProperty("w", out var rw) ? rw.GetSingle() : 1f;
+                rotation = new Quaternion(x, y, z, w);
+                transform.rotation = rotation;
+            }
+
+            if (scaleToken.HasValue)
+            {
+                float x = scaleToken.Value.TryGetProperty("x", out var sx) ? sx.GetSingle() : 1f;
+                float y = scaleToken.Value.TryGetProperty("y", out var sy) ? sy.GetSingle() : 1f;
+                float z = scaleToken.Value.TryGetProperty("z", out var sz) ? sz.GetSingle() : 1f;
+                scale = new Vector3(x, y, z);
+                transform.scale = scale;
+            }
+
+            
+
+            // Process components for variable data
+            List<DataContainer> data = new List<DataContainer>();
+            JsonElement components = slotNode.GetProperty("data").GetProperty("components");
+            foreach (JsonElement component in components.EnumerateArray())
+            {
+				//slotNode.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+				var type = component.GetProperty("componentType").GetString();
+                if ( type.Contains("DynamicValueVariable<"))
+                {
+                    JsonElement members = component.GetProperty("members");
+
+					// Get the variable from the template <>
+					int start = type.IndexOf("<");
+					int end = type.IndexOf(">");
+					string? inner = (start != -1 && end != -1 && end > start) ? type.Substring(start + 1, end - start - 1) : null;
+
+					string varType = inner == null ? "" : inner;
+					string? varName = members.GetProperty("VariableName").GetProperty("value").GetString();
+					JsonElement varValue = members.GetProperty("Value");
+
+                    if ( varName == null) continue;
+
+                    data.Add(new DataContainer(varType, varName, varValue));
+				}
+			}
+
+            worldObject.id = id;
+            worldObject.tag = tagValue;
+			worldObject.name = nameToken == null ? "no_name" : nameToken;
+			worldObject.home = guid;
+			worldObject.transform = transform;
+            worldObject.data = data.ToArray();
+
+			worldUpdate.objects.Add(worldObject);
+		}
+		#endregion
+	}
 }
