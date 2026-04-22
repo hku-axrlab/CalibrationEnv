@@ -3,8 +3,8 @@ using System.Text.Json;
 
 namespace CalibrationEnv
 {
-    [System.Serializable]
-    struct WorldUpdate
+    [Serializable]
+    class WorldUpdate
     {
         public List<WorldObject> objects;
 		public List<UserData> users;
@@ -51,13 +51,17 @@ namespace CalibrationEnv
 
         public string GetWorldModelJson(string excludeFrom = "")
         {
-            WorldUpdate data;            
-			data.objects = objects.Values.Where(x => x.home != excludeFrom).ToList();
-			data.users = users.Values.Where(x => x.home != excludeFrom).ToList();
+            return JsonSerializer.Serialize(GetWorldModel(excludeFrom), jsonOptions);
+        }
 
-            string jsonString = JsonSerializer.Serialize(data, jsonOptions);
-
-            return jsonString;
+        public WorldUpdate GetWorldModel(string excludeFrom = "")
+        {
+            WorldUpdate data = new()
+            {
+                objects = [.. objects.Values.Where(x => x.home != excludeFrom)],
+                users = [.. users.Values.Where(x => x.home != excludeFrom)]
+            };
+            return data;
         }
 
         public bool ContainsObject(string? id)

@@ -10,8 +10,14 @@ namespace CalibrationEnv
 {
     internal class ResoniteAdaptor : Adaptor
     {
-        private ClientWebSocket socket;
-        private readonly SemaphoreSlim socketLock = new SemaphoreSlim(1, 1);
+        // socket to connect with ResoniteLink
+        private ClientWebSocket socketResoLink;
+        private readonly SemaphoreSlim socketLockResoLink = new SemaphoreSlim(1, 1);
+
+        // port and socket to send seperate user updates to Resonite, to send msg from clients
+        private readonly int resonitePort = 5001; // TODO: is this actually the port?
+        private ClientWebSocket socketResonite;
+        private readonly SemaphoreSlim socketLockResonite = new SemaphoreSlim(1, 1);
 
         // pending requests collection, to match responses with requests using message ID
         private readonly ConcurrentDictionary<string, TaskCompletionSource<string>> pendingRequests = [];
@@ -30,19 +36,20 @@ namespace CalibrationEnv
 
         public ResoniteAdaptor(WorldModel worldModel) : base(worldModel)
         {
-            socket = new ClientWebSocket();
+            socketResoLink = new ClientWebSocket();
+            socketResonite = new ClientWebSocket();
         }
 
         public override async Task StartAsync(CancellationToken token)
         {
-            uint resonitePort;
+            uint inputPort;
 
             while (true)
             {
-                // prompt for port to Resonite world
-                Console.Write("Enter port number Resonite world: ");
+                // prompt for port to ResoniteLink world
+                Console.Write("Enter port number ResoniteLink world: ");
                 var input = Console.ReadLine();
-                if (!uint.TryParse(input, out resonitePort))
+                if (!uint.TryParse(input, out inputPort))
                 {
                     Console.WriteLine("Invalid port number.\n");
                     continue;
@@ -50,8 +57,8 @@ namespace CalibrationEnv
 
                 // create new socket per attempt
                 // since it's probably broken/disposed after failed attempt
-                socket?.Dispose();
-                socket = new ClientWebSocket();
+                socketResoLink?.Dispose();
+                socketResoLink = new ClientWebSocket();
 
                 // attempt connect with timeout
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -59,8 +66,8 @@ namespace CalibrationEnv
 
                 try
                 {
-                    await socket.ConnectAsync(
-                        new Uri($"ws://localhost:{resonitePort}"),
+                    await socketResoLink.ConnectAsync(
+                        new Uri($"ws://localhost:{inputPort}"),
                         cts.Token
                     );
 
@@ -77,7 +84,38 @@ namespace CalibrationEnv
                 }
             }
 
-            guid = GenerateId("resonite", "127.0.0.1", resonitePort);
+            while (true)
+            {
+                // setup connection to Resonite world
+
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                cts.CancelAfter(TimeSpan.FromSeconds(5));
+
+                try
+                {
+                    await socketResonite.ConnectAsync(
+                        new Uri($"ws://localhost:{resonitePort}"),
+                        cts.Token
+                    );
+
+                    Console.WriteLine("Connected second socket to Resonite world!");
+                    break;
+                }
+                catch (OperationCanceledException)
+                {
+                    Console.WriteLine("Connection timed out.\n");
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Connection failed: {ex.Message}\n");
+                    break;
+                }
+
+                // tODO: do fix instead of break
+            }
+
+            guid = GenerateId("resonite", "127.0.0.1", inputPort);
 
             // call base, should return instantly
             await base.StartAsync(token);
@@ -101,24 +139,39 @@ namespace CalibrationEnv
             worldModel.ApplyUpdate(WorldUpdateSource.Resonite, update);
         }
 
-        protected override Task SendStep()
+        protected override async Task SendStep()
         {
-            // TODO: not sure how to handle world updates -> Resonite
-            // possible idea below - keep track of commands/special objects?
-            // commands would be send by clients?
-
             // First only send non-resonite users
             // Later send non-resonite Objects too
 
-            // send queued client inputs to Resonite
-            //var commands = worldModel.ConsumeOutgoingCommands();
+            // get update from world
+            WorldUpdate update = worldModel.GetWorldModel(guid);
 
-            //foreach (var cmd in commands)
-            //{
-            //    await SendToResonite(cmd);
-            //}
+            // send msg per user per bone to resonite to update users
+            foreach (var user in update.users)
+            {
+                for (int i = 0; i < user.boneNames.Length; i++)
+                {
+                    var position = user.boneTransforms[i].position;
+                    var rotation = MathUtils.ToEulerAngles(user.boneTransforms[i].rotation);
 
-            return Task.CompletedTask;
+                    var msg = string.Join(';', user.name, user.id, user.boneNames[i],
+                        position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z
+                    );
+
+                    await socketLockResonite.WaitAsync();
+                    try
+                    {
+                        await socketResonite.SendAsync(Encoding.UTF8.GetBytes(msg), WebSocketMessageType.Text, true, CancellationToken.None);
+                    }
+                    finally
+                    {
+                        socketLockResonite.Release();
+                    }
+                }
+            }
+
+
         }
 
         private async Task ReceiveLoop(CancellationToken token)
@@ -133,7 +186,7 @@ namespace CalibrationEnv
                 WebSocketReceiveResult result;
                 do
                 {
-                    result = await socket.ReceiveAsync(buffer, token);
+                    result = await socketResoLink.ReceiveAsync(buffer, token);
 
                     if (result.MessageType == WebSocketMessageType.Close)
                         return;
@@ -282,14 +335,14 @@ namespace CalibrationEnv
 
             byte[] bytes = GetMsgAsByteArray(msg, type);
 
-            await socketLock.WaitAsync();
+            await socketLockResoLink.WaitAsync();
             try
             {
-                await socket.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None);
+                await socketResoLink.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None);
             }
             finally
             {
-                socketLock.Release();
+                socketLockResoLink.Release();
             }
 
             // wait for response with timeout

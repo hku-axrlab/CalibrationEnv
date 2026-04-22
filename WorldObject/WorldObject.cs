@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Text;
 using System.Text.Json;
-using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace CalibrationEnv
 {
@@ -40,7 +39,7 @@ namespace CalibrationEnv
     }
 
     [Serializable]
-    internal struct Transform
+    internal class Transform
     {
         public Vector3 position;
         public Quaternion rotation;
@@ -52,10 +51,17 @@ namespace CalibrationEnv
             rotation = new Quaternion();
             scale = new Vector3();
         }
+
+        public Transform(Vector3 position, Quaternion rotation, Vector3 scale)
+        {
+            this.position = position;
+            this.rotation = rotation;
+            this.scale = scale;
+        }
     }
 
     [Serializable]
-    internal struct DataContainer
+    internal class DataContainer
     {
         public string type;
         public string name;
@@ -70,7 +76,7 @@ namespace CalibrationEnv
     }
 
 	[Serializable]
-	internal struct UserData
+	internal class UserData
 	{
 		public string id;
 		public string home;
@@ -81,7 +87,6 @@ namespace CalibrationEnv
 		public void ApplyFrom(UserData other)
 		{
             name = other.name;
-            // Check if this is slow or not... might want to more efficiently copy data
             boneNames = other.boneNames;
             boneTransforms = other.boneTransforms;
 		}

@@ -1,6 +1,7 @@
 ﻿using Fleck;
 using System.Collections;
 using System.Collections.Concurrent;
+using System.Net.WebSockets;
 using System.Text.Json;
 
 namespace CalibrationEnv
@@ -75,7 +76,7 @@ namespace CalibrationEnv
                 {
                     actionQueue.Enqueue(async () =>
                     {
-                        Console.WriteLine($"Received from client {socket.ConnectionInfo.Id}: {msg}");
+                        //Console.WriteLine($"Received from client {socket.ConnectionInfo.Id}: {msg}");
 
                         // check if connection actually opened
                         if (!clients.Contains(socket))
@@ -111,13 +112,11 @@ namespace CalibrationEnv
                                 break;
 
                             case MessageType.ResoniteData:
-                                ProcessDataMsg(socket, root);
+                                ProcessMsg(socket, root);
                                 break;
 
                             case MessageType.ClientData:
-                                // TODO: probably process client data messages differently, 
-                                // but that's an adventure for future me! 
-                                //ProcessDataMsg(socket, root);
+                                ProcessMsg(socket, root);
                                 break;
 
                             default:
@@ -192,7 +191,7 @@ namespace CalibrationEnv
             }
         }
 
-        private bool ProcessDataMsg(IWebSocketConnection socket, JsonElement msgRoot)
+        private bool ProcessMsg(IWebSocketConnection socket, JsonElement msgRoot)
         {
             // check if adaptor exists for socket
             if (!adaptors.ContainsKey(socket.ConnectionInfo.Id))

@@ -49,7 +49,7 @@ namespace CalibrationEnv
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"SendLoop error: {ex.Message}");
+                    //Console.WriteLine($"SendLoop error: {ex.Message}");
                 }
 
                 await Task.Delay(GetSendInterval(), token);
@@ -79,7 +79,7 @@ namespace CalibrationEnv
 
 			// Combine IP bytes + port into a single uint to hash
 			byte[] ipBytes = ip.GetAddressBytes(); // assumes IPv4
-			uint seed = BitConverter.ToUInt32(ipBytes, 0) ^ port;
+			uint seed = BitConverter.ToUInt32(ipBytes, 0);
 
 			// FNV-32a hash
 			uint hash = 2166136261u;
