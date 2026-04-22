@@ -1,5 +1,7 @@
-﻿using ResoniteLink;
+﻿using Fleck;
+using ResoniteLink;
 using System.Collections.Concurrent;
+using System.Net;
 using System.Net.WebSockets;
 using System.Numerics;
 using System.Text;
@@ -16,7 +18,8 @@ namespace CalibrationEnv
 
         // port and socket to send seperate user updates to Resonite, to send msg from clients
         private readonly int resonitePort = 5001; // TODO: is this actually the port?
-        private ClientWebSocket socketResonite;
+        private HttpListener resoniteSendServer;
+        private WebSocket resoniteSendSocket;
         private readonly SemaphoreSlim socketLockResonite = new SemaphoreSlim(1, 1);
 
         // pending requests collection, to match responses with requests using message ID
@@ -37,7 +40,7 @@ namespace CalibrationEnv
         public ResoniteAdaptor(WorldModel worldModel) : base(worldModel)
         {
             socketResoLink = new ClientWebSocket();
-            socketResonite = new ClientWebSocket();
+            resoniteSendServer = new HttpListener();
         }
 
         public override async Task StartAsync(CancellationToken token)
@@ -89,14 +92,24 @@ namespace CalibrationEnv
                 // setup connection to Resonite world
 
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                cts.CancelAfter(TimeSpan.FromSeconds(5));
+                cts.CancelAfter(TimeSpan.FromSeconds(10));
 
                 try
                 {
-                    await socketResonite.ConnectAsync(
-                        new Uri($"ws://localhost:{resonitePort}"),
-                        cts.Token
-                    );
+                    resoniteSendServer.Prefixes.Add("http://localhost:5001/echo/");
+                    resoniteSendServer.Start();
+
+                    HttpListenerContext ctx = await resoniteSendServer.GetContextAsync();
+
+                    if ( !ctx.Request.IsWebSocketRequest)
+                    {
+                        ctx.Response.StatusCode = 400;
+                        ctx.Response.Close();
+                        return;
+                    }
+
+                    HttpListenerWebSocketContext wsCtx = await ctx.AcceptWebSocketAsync(subProtocol: null);
+                    resoniteSendSocket = wsCtx.WebSocket;
 
                     Console.WriteLine("Connected second socket to Resonite world!");
                     break;
@@ -153,16 +166,16 @@ namespace CalibrationEnv
                 for (int i = 0; i < user.boneNames.Length; i++)
                 {
                     var position = user.boneTransforms[i].position;
-                    var rotation = MathUtils.ToEulerAngles(user.boneTransforms[i].rotation);
+                    var rotation = user.boneTransforms[i].rotation;
 
                     var msg = string.Join(';', user.name, user.id, user.boneNames[i],
-                        position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z
+                        position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z, rotation.W
                     );
 
                     await socketLockResonite.WaitAsync();
                     try
                     {
-                        await socketResonite.SendAsync(Encoding.UTF8.GetBytes(msg), WebSocketMessageType.Text, true, CancellationToken.None);
+                        await resoniteSendSocket.SendAsync(Encoding.UTF8.GetBytes(msg), WebSocketMessageType.Text, true, CancellationToken.None);
                     }
                     finally
                     {
@@ -170,8 +183,6 @@ namespace CalibrationEnv
                     }
                 }
             }
-
-
         }
 
         private async Task ReceiveLoop(CancellationToken token)

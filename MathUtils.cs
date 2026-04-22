@@ -1,4 +1,5 @@
-﻿using System.Numerics;
+﻿using ResoniteLink;
+using System.Numerics;
 
 namespace CalibrationEnv
 {
@@ -49,7 +50,20 @@ namespace CalibrationEnv
             double cosy_cosp = 1 - 2 * (q.Y * q.Y + q.Z * q.Z);
             angles.Z = (float)Math.Atan2(siny_cosp, cosy_cosp);
 
-            return angles;
+            // scale to degrees
+            return (angles / (float)Math.PI) * 180.0f;
+        }
+
+        public static void FixAngles( ref Vector3 euler )
+        {
+            if (euler.X > 180.0f) euler.X -= 360;
+            else if (euler.X < -180.0f) euler.X += 360;
+
+            if (euler.Y > 180.0f) euler.Y -= 360;
+            else if (euler.Y < -180.0f) euler.Y += 360;
+
+            if (euler.Z > 180.0f) euler.Z -= 360;
+            else if (euler.Z < -180.0f) euler.Z += 360;
         }
     }
 }
