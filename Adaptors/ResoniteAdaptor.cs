@@ -1,5 +1,4 @@
-﻿using Fleck;
-using ResoniteLink;
+﻿using ResoniteLink;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.WebSockets;
@@ -45,8 +44,24 @@ namespace CalibrationEnv
 
         public override async Task StartAsync(CancellationToken token)
         {
+            // setup connections
+            await ConnectToResonite(token);
+
+            // call base, should return instantly
+            await base.StartAsync(token);
+
+            // fire tasks, run completely as background task on threadpool
+            _ = Task.Run(() => ReceiveLoop(token), token);
+            _ = Task.Run(() => GetRootLoop(token), token);
+            _ = Task.Run(() => GetChildrenLoop(token), token);
+        }
+
+        private async Task ConnectToResonite(CancellationToken token)
+        {
             uint inputPort;
 
+            // connection to ResoniteLink 
+            // used to obtain data from Resonite world
             while (true)
             {
                 // prompt for port to ResoniteLink world
@@ -74,7 +89,7 @@ namespace CalibrationEnv
                         cts.Token
                     );
 
-                    Console.WriteLine("Connected to Resonite world!");
+                    Console.WriteLine("Connected to ResoniteLink!\n");
                     break;
                 }
                 catch (OperationCanceledException)
@@ -87,21 +102,35 @@ namespace CalibrationEnv
                 }
             }
 
+            // setup connection to Resonite 
+            // used to set data back to Resonite world
             while (true)
             {
-                // setup connection to Resonite world
-
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                cts.CancelAfter(TimeSpan.FromSeconds(10));
 
                 try
                 {
                     resoniteSendServer.Prefixes.Add("http://localhost:5001/echo/");
                     resoniteSendServer.Start();
 
-                    HttpListenerContext ctx = await resoniteSendServer.GetContextAsync();
+                    var getContextTask = resoniteSendServer.GetContextAsync();
+                    var timeoutTask = Task.Delay(TimeSpan.FromSeconds(10), cts.Token);
 
-                    if ( !ctx.Request.IsWebSocketRequest)
+                    var completed = await Task.WhenAny(getContextTask, timeoutTask);
+
+                    if (completed != getContextTask)
+                    {
+                        Console.WriteLine("Connection timed out.");
+
+                        // stop listener! 
+                        resoniteSendServer.Stop();
+
+                        return;
+                    }
+
+                    var ctx = await getContextTask;
+
+                    if (!ctx.Request.IsWebSocketRequest)
                     {
                         ctx.Response.StatusCode = 400;
                         ctx.Response.Close();
@@ -111,7 +140,7 @@ namespace CalibrationEnv
                     HttpListenerWebSocketContext wsCtx = await ctx.AcceptWebSocketAsync(subProtocol: null);
                     resoniteSendSocket = wsCtx.WebSocket;
 
-                    Console.WriteLine("Connected second socket to Resonite world!");
+                    Console.WriteLine("Connected to Resonite!\n");
                     break;
                 }
                 catch (OperationCanceledException)
@@ -125,18 +154,10 @@ namespace CalibrationEnv
                     break;
                 }
 
-                // tODO: do fix instead of break
+                // TODO: do fix instead of break
             }
 
             guid = GenerateId("resonite", "127.0.0.1", inputPort);
-
-            // call base, should return instantly
-            await base.StartAsync(token);
-
-            // fire tasks, run completely as background task on threadpool
-            _ = Task.Run(() => ReceiveLoop(token), token);
-            _ = Task.Run(() => GetRootLoop(token), token);
-            _ = Task.Run(() => GetChildrenLoop(token), token);
         }
 
         public override void Receive(JsonElement msgRoot)
@@ -154,6 +175,11 @@ namespace CalibrationEnv
 
         protected override async Task SendStep()
         {
+            // FIXME: returning when no socket setup
+            // since it can fail setting up rn and hold the whole app hostage
+            if (resoniteSendSocket == null)
+                return;
+
             // First only send non-resonite users
             // Later send non-resonite Objects too
 
