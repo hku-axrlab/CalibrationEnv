@@ -29,17 +29,23 @@ namespace CalibrationEnv
         {
             WorldUpdate update = new();
 
-            JsonElement users = msgRoot.GetProperty("users");
-            foreach (JsonElement userJson in users.EnumerateArray())
+            JsonElement users;
+            if ( msgRoot.TryGetProperty("users", out users) )
             {
-                ParseUser(userJson, ref update);
+                foreach (JsonElement userJson in users.EnumerateArray())
+                {
+                    ParseUser(userJson, ref update);
+                }
             }
+            
 
-            JsonElement objects = msgRoot.GetProperty("objects");
-            foreach (JsonElement objectJson in objects.EnumerateArray())
-            {
-                ParseObject(objectJson, ref update);
-            }
+            JsonElement objects;
+            if ( msgRoot.TryGetProperty("objects", out objects )) {
+                foreach (JsonElement objectJson in objects.EnumerateArray())
+                {
+                    ParseObject(objectJson, ref update);
+                }
+            }            
 
             worldModel.ApplyUpdate(WorldUpdateSource.Client, update);
         }
@@ -105,14 +111,62 @@ namespace CalibrationEnv
             worldUpdate.users.Add(userData);
         }
 
-        private void ParseObject(JsonElement userNode, ref WorldUpdate worldUpdate)
+        private void ParseObject(JsonElement objectNode, ref WorldUpdate worldUpdate)
         {
             WorldObject obj = new();
 
             // TODO: Parse
+            var name = objectNode.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
+            var id = objectNode.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+            var tag = objectNode.TryGetProperty("tag", out var tagProp) ? tagProp.GetString() : null;
 
+            var transformElement = objectNode.GetProperty("transform");
+            var posElement = transformElement.GetProperty("position");
+            var rotElement = transformElement.GetProperty("rotation");
+            var scaleElement = transformElement.GetProperty("scale");
 
-            // worldUpdate.objects.Add(obj);
+            Vector3 position = new Vector3(
+                posElement.GetProperty("x").GetSingle(),
+                posElement.GetProperty("y").GetSingle(),
+                posElement.GetProperty("z").GetSingle()
+                );
+
+            Quaternion rotation = new Quaternion(
+                rotElement.GetProperty("x").GetSingle(),
+                rotElement.GetProperty("y").GetSingle(),
+                rotElement.GetProperty("z").GetSingle(),
+                rotElement.GetProperty("w").GetSingle()
+                );
+
+            Vector3 scale = new Vector3(
+                scaleElement.GetProperty("x").GetSingle(),
+                scaleElement.GetProperty("y").GetSingle(),
+                scaleElement.GetProperty("z").GetSingle()
+                );
+
+            var dataElements = objectNode.GetProperty("variables");
+            List<DataContainer> dataList = new List<DataContainer>(dataElements.GetArrayLength());
+            foreach( JsonElement variable in dataElements.EnumerateArray())
+            {
+                
+                string? dataName = variable.GetProperty("name").GetString();
+                string? dataType = variable.GetProperty("type").GetString();
+                JsonElement dataElement = variable.GetProperty("value");
+
+                DataContainer data = new DataContainer(dataName, dataType, dataElement);
+                dataList.Add(data);
+            }
+
+            obj.home = guid;
+            obj.name = name;
+            obj.tag = tag;
+            obj.id = id;
+            obj.transform.position = position;
+            obj.transform.rotation = rotation;
+            obj.transform.scale = scale;
+            obj.data = dataList.ToArray();
+
+            worldUpdate.objects.Add(obj);
         }
     }
 }

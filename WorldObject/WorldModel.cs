@@ -29,6 +29,31 @@ namespace CalibrationEnv
 
         }
 
+        public void RemoveAllFor( string guid )
+        {
+            List<string> staleUsers = new List<string>();
+            foreach( UserData user in users.Values )
+            {
+                if ( user.home == guid )
+                    staleUsers.Add(user.id);
+            }
+
+            List<string> staleObjects = new List<string>();
+            foreach (WorldObject obj in objects.Values)
+            {
+                if (obj.home == guid)
+                    staleObjects.Add(obj.id);
+            }
+
+            foreach (string id in staleUsers)
+                users.Remove(id, out _);
+
+            foreach (string id in staleObjects)
+                objects.Remove(id, out _);
+
+            // TODO: signal that these objects should be deleted (?)
+        }
+
         public void ApplyUpdate(WorldUpdateSource source, WorldUpdate update)
         {
 			// Parse the WorldUpdate and apply to dictionaries

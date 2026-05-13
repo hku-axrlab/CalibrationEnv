@@ -66,6 +66,9 @@ namespace CalibrationEnv
                     actionQueue.Enqueue(() =>
                     {
                         clients.Remove(socket);
+                        string guid = adaptors[socket.ConnectionInfo.Id].GUID;
+                        while (adaptors.Remove(socket.ConnectionInfo.Id, out _));
+                        worldModel.RemoveAllFor(guid);
                         Console.WriteLine($"Client {socket.ConnectionInfo.Id} disconnected");
                     });
                 };

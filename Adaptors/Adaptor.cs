@@ -14,6 +14,7 @@ namespace CalibrationEnv
         // reference to world model to obtain world data 
         protected readonly WorldModel worldModel;
         protected string guid;
+        public string GUID => guid;
 
         public Adaptor(WorldModel worldModel)
         {
