@@ -39,7 +39,6 @@ namespace CalibrationEnv
         public ResoniteAdaptor(WorldModel worldModel) : base(worldModel)
         {
             socketResoLink = new ClientWebSocket();
-            resoniteSendServer = new HttpListener();
         }
 
         public override async Task StartAsync(CancellationToken token)
@@ -94,11 +93,11 @@ namespace CalibrationEnv
                 }
                 catch (OperationCanceledException)
                 {
-                    Console.WriteLine("Connection timed out.\n");
+                    Console.WriteLine("Connection to ResoniteLink timed out.\n");
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Connection failed: {ex.Message}\n");
+                    Console.WriteLine($"Connection to ResoniteLink failed: {ex.Message}\n");
                 }
             }
 
@@ -110,6 +109,8 @@ namespace CalibrationEnv
 
                 try
                 {
+                    resoniteSendServer = new HttpListener();
+
                     resoniteSendServer.Prefixes.Add("http://localhost:5001/echo/");
                     resoniteSendServer.Start();
 
@@ -120,7 +121,7 @@ namespace CalibrationEnv
 
                     if (completed != getContextTask)
                     {
-                        Console.WriteLine("Connection timed out.");
+                        Console.WriteLine("Connection to Resonite timed out.\n");
 
                         // stop listener! 
                         resoniteSendServer.Stop();
@@ -132,6 +133,7 @@ namespace CalibrationEnv
 
                     if (!ctx.Request.IsWebSocketRequest)
                     {
+                        Console.WriteLine($"Connection to Resonite failed: not a WebSocket Request.\n");
                         ctx.Response.StatusCode = 400;
                         ctx.Response.Close();
                         return;
@@ -145,16 +147,14 @@ namespace CalibrationEnv
                 }
                 catch (OperationCanceledException)
                 {
-                    Console.WriteLine("Connection timed out.\n");
+                    Console.WriteLine("Connection to Resonite timed out.\n");
                     break;
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Connection failed: {ex.Message}\n");
+                    Console.WriteLine($"Connection to Resonite failed: {ex.Message}\n");
                     break;
                 }
-
-                // TODO: do fix instead of break
             }
 
             guid = GenerateId("resonite", "127.0.0.1", inputPort);
