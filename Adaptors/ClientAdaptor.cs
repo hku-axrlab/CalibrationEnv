@@ -11,12 +11,12 @@ namespace CalibrationEnv
 
         protected override int GetSendInterval() => 17;
 
-        public ClientAdaptor(WorldModel worldModel, IWebSocketConnection? socket, string type ) : base(worldModel)
+        public ClientAdaptor(WorldModel worldModel, IWebSocketConnection? socket, string type) : base(worldModel)
         {
             this.socket = socket;
             if (socket != null)
                 this.guid = GenerateId(type, socket.ConnectionInfo.ClientIpAddress, (uint)socket.ConnectionInfo.ClientPort);
-		}
+        }
 
         protected override async Task SendStep()
         {
@@ -29,11 +29,18 @@ namespace CalibrationEnv
         {
             WorldUpdate update = new();
 
-            JsonElement responses = msgRoot.GetProperty("users");
-            foreach (JsonElement slotNode in responses.EnumerateArray())
+            JsonElement users = msgRoot.GetProperty("users");
+            foreach (JsonElement userJson in users.EnumerateArray())
             {
-                ParseUser(slotNode, ref update);
+                ParseUser(userJson, ref update);
             }
+
+            JsonElement objects = msgRoot.GetProperty("objects");
+            foreach (JsonElement objectJson in objects.EnumerateArray())
+            {
+                ParseObject(objectJson, ref update);
+            }
+
             worldModel.ApplyUpdate(WorldUpdateSource.Client, update);
         }
 
@@ -83,7 +90,7 @@ namespace CalibrationEnv
 
             // very simple error handling - really should just be correct
             // otherwise, fix!
-            if(boneTransforms.Count != boneNames.Count)
+            if (boneTransforms.Count != boneNames.Count)
             {
                 Console.WriteLine($"User parsed with wrong bones - won't be added. {boneTransforms.Count} Transforms, but {boneNames.Count} names!");
                 return;
@@ -96,6 +103,16 @@ namespace CalibrationEnv
             userData.boneTransforms = [.. boneTransforms];
 
             worldUpdate.users.Add(userData);
+        }
+
+        private void ParseObject(JsonElement userNode, ref WorldUpdate worldUpdate)
+        {
+            WorldObject obj = new();
+
+            // TODO: Parse
+
+
+            // worldUpdate.objects.Add(obj);
         }
     }
 }
