@@ -23,8 +23,10 @@ namespace CalibrationEnv
             if (socket != null && socket.IsAvailable)
             {
                 await socket.Send(worldModel.GetWorldModelJson(guid));
+                await Task.Delay(16);   // TODO: calculate how much longer we need to wait (should always be less than 16ms)
             }
         }
+
         public override void Receive(JsonElement msgRoot)
         {
             WorldUpdate update = new();
@@ -153,7 +155,7 @@ namespace CalibrationEnv
                 string? dataType = variable.GetProperty("type").GetString();
                 JsonElement dataElement = variable.GetProperty("value");
 
-                DataContainer data = new DataContainer(dataName, dataType, dataElement);
+                DataContainer data = new DataContainer(dataType, dataName, dataElement.Clone());
                 dataList.Add(data);
             }
 

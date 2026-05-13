@@ -209,6 +209,8 @@ namespace CalibrationEnv
                     }
                 }
             }
+
+            await Task.Delay(33);   // Calculate how much is left to target 30fps (maybe have this as a setting)
         }
 
         private async Task ReceiveLoop(CancellationToken token)
@@ -253,6 +255,8 @@ namespace CalibrationEnv
                 {
                     tcs.SetResult(msg);
                 }
+
+                await Task.Delay(1);
             }
         }
 
@@ -537,11 +541,11 @@ namespace CalibrationEnv
 
                     string varType = inner == null ? "" : inner;
                     string? varName = members.GetProperty("VariableName").GetProperty("value").GetString();
-                    JsonElement varValue = members.GetProperty("Value");
+                    JsonElement varValue = members.GetProperty("Value").GetProperty("value");
 
                     if (varName == null) continue;
 
-                    data.Add(new DataContainer(varType, varName, varValue));
+                    data.Add(new DataContainer(varType, varName, varValue.Clone()));
                 }
             }
 

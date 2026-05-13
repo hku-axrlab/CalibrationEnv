@@ -49,7 +49,7 @@ namespace CalibrationEnv
                 }
                 catch (Exception ex)
                 {
-                    //Console.WriteLine($"SendLoop error: {ex.Message}");
+                    Console.WriteLine($"SendLoop error: {ex.Message} {ex.StackTrace}");
                 }
 
                 await Task.Delay(GetSendInterval(), token);
