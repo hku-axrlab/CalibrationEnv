@@ -13,24 +13,35 @@ namespace CalibrationEnv
     {
         // reference to world model to obtain world data 
         protected readonly WorldModel worldModel;
-        protected string guid;
-        public string GUID => guid;
 
+        // reference to tasks running 
+        protected readonly List<Task> tasks = [];
+
+        // unique identifier for this adaptor,
+        // generated on connect and used to identify client 
+        public string Guid { get; protected set; }
+
+        /// <summary>
+        /// Constructor for Adaptor
+        /// </summary>
+        /// <param name="worldModel">The world model to be used by the adaptor.</param>
         public Adaptor(WorldModel worldModel)
         {
             this.worldModel = worldModel;
-            this.guid = "";
+            this.Guid = "";
         }
 
         /// <summary>
         /// Starts async loop to send messages to client on interval. 
         /// </summary>
-        /// <param name="token"></param>
+        /// <param name="cts"></param>
         /// <returns></returns>
         public virtual Task StartAsync(CancellationToken token)
         {
-            Task.Run(() => RunSendLoop(token), token);
+            // start send loop
+            tasks.Add(RunSendLoop(token));
 
+            // return success
             return Task.CompletedTask;
         }
 
@@ -45,7 +56,7 @@ namespace CalibrationEnv
             {
                 try
                 {
-                    await SendStep();
+                    await Send(token);
                 }
                 catch (Exception ex)
                 {
@@ -56,7 +67,8 @@ namespace CalibrationEnv
             }
         }
 
-        protected abstract Task SendStep();
+        protected abstract Task Send(CancellationToken token);
+
         protected abstract int GetSendInterval();
 
         /// <summary>
@@ -66,14 +78,19 @@ namespace CalibrationEnv
         /// <param name="msgRoot">JSONElement containing the root of the message.</param>
         public abstract void Receive(JsonElement msgRoot);
 
-		/// <summary>
-		/// Function to generate a unique string-id for an Adaptor.
-		/// </summary>
-		/// <param name="adaptorType"></param>
-		/// <param name="ipString">Must be IPv4</param>
-		/// <param name="port"></param>
-		/// <returns></returns>
-		public static string GenerateId(string adaptorType, string ipString, uint port)
+        public async Task EndAsync()
+        {
+            await Task.WhenAll(tasks);
+        }
+
+        /// <summary>
+        /// Function to generate a unique string-id for an Adaptor.
+        /// </summary>
+        /// <param name="adaptorType"></param>
+        /// <param name="ipString">Must be IPv4</param>
+        /// <param name="port"></param>
+        /// <returns></returns>
+        public static string GenerateId(string adaptorType, string ipString, uint port)
 		{
             IPAddress ip = IPAddress.Parse(ipString);
 

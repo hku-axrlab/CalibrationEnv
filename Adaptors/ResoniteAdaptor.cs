@@ -9,26 +9,20 @@ using System.Text.RegularExpressions;
 
 namespace CalibrationEnv
 {
+    // TODO: make stand-alone application. Launch with params --with-resonite.
     internal class ResoniteAdaptor : Adaptor
     {
-        // socket to connect with ResoniteLink
-        private ClientWebSocket socketResoLink;
-        private readonly SemaphoreSlim socketLockResoLink = new SemaphoreSlim(1, 1);
+        // receive - used for ResoniteLink connection to receive data from Resonite world
+        private ClientWebSocket receiveSocket;
+        private readonly SemaphoreSlim receiveSocketLock = new(1, 1);
 
-        // port and socket to send seperate user updates to Resonite, to send msg from clients
-        private readonly int resonitePort = 5001; // TODO: is this actually the port?
-        private HttpListener resoniteSendServer;
-        private WebSocket resoniteSendSocket;
-        private readonly SemaphoreSlim socketLockResonite = new SemaphoreSlim(1, 1);
+        // send - used for Resonite connection to send data to Resonite world
+        private readonly int resonitePort = 5001;
+        private HttpListener sendServer;
+        private WebSocket sendSocket;
+        private readonly SemaphoreSlim sendSocketLock = new(1, 1);
 
-        // pending requests collection, to match responses with requests using message ID
-        private readonly ConcurrentDictionary<string, TaskCompletionSource<string>> pendingRequests = [];
-
-        // registered slot collection, to keep track of discovered slot ID's from Root slot,
-        // and request data on those in batch, only interested in tagged slots
-        private readonly ConcurrentDictionary<string, byte> registeredSlots = [];       // byte value always 0, just wanted to ConcurrentDic pattern
-
-        // interval times for requesting slots, in ms
+        // interval times for requesting slots from Resonite world, in ms
         protected readonly int rootMsgInterval = 1000;
         protected readonly int childMsgInterval = 17;
         protected override int GetSendInterval() => 17;
@@ -36,23 +30,33 @@ namespace CalibrationEnv
         private const int MAX_MESSAGE_SIZE = 1024 * 1024; // 1 MB
         private const int BUFFER_SIZE = 8192;
 
-        public ResoniteAdaptor(WorldModel worldModel) : base(worldModel)
+        // pending requests collection,
+        // to match responses with requests using message ID
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<string>> pendingRequests = [];
+
+        // registered slot (world objects) collection,
+        // to keep track of discovered slot ID's (children from Root slot with a tag),
+        // and to request data for those in batches 
+        // NOTE: byte value always 0, just wanted ConcurrentDic pattern
+        private readonly ConcurrentDictionary<string, byte> registeredSlots = [];
+
+        public ResoniteAdaptor(WorldModel worldModel) : base(worldModel) 
         {
-            socketResoLink = new ClientWebSocket();
+            
         }
 
         public override async Task StartAsync(CancellationToken token)
         {
-            // setup connections
+            // setup connections to resonite
             await ConnectToResonite(token);
 
-            // call base, should return instantly
+            // call base (should return instantly)
             await base.StartAsync(token);
 
-            // fire tasks, run completely as background task on threadpool
-            _ = Task.Run(() => ReceiveLoop(token), token);
-            _ = Task.Run(() => GetRootLoop(token), token);
-            _ = Task.Run(() => GetChildrenLoop(token), token);
+            // start tasks, and keep refs
+            tasks.Add(ReceiveLoop(token));
+            tasks.Add(GetRootLoop(token));
+            tasks.Add(GetChildrenLoop(token));
         }
 
         private async Task ConnectToResonite(CancellationToken token)
@@ -61,7 +65,7 @@ namespace CalibrationEnv
 
             // connection to ResoniteLink 
             // used to obtain data from Resonite world
-            while (true)
+            while (!token.IsCancellationRequested)
             {
                 // prompt for port to ResoniteLink world
                 Console.Write("Enter port number ResoniteLink world: ");
@@ -72,10 +76,9 @@ namespace CalibrationEnv
                     continue;
                 }
 
-                // create new socket per attempt
-                // since it's probably broken/disposed after failed attempt
-                socketResoLink?.Dispose();
-                socketResoLink = new ClientWebSocket();
+                // create new socket (per attempt, since it will break after failed attempt)
+                receiveSocket?.Dispose();
+                receiveSocket = new ClientWebSocket();
 
                 // attempt connect with timeout
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -83,12 +86,11 @@ namespace CalibrationEnv
 
                 try
                 {
-                    await socketResoLink.ConnectAsync(
-                        new Uri($"ws://localhost:{inputPort}"),
-                        cts.Token
-                    );
+                    await receiveSocket.ConnectAsync(new Uri($"ws://localhost:{inputPort}"), cts.Token);
 
+                    Guid = GenerateId("resonite", "127.0.0.1", inputPort);
                     Console.WriteLine("Connected to ResoniteLink!\n");
+
                     break;
                 }
                 catch (OperationCanceledException)
@@ -102,19 +104,18 @@ namespace CalibrationEnv
             }
 
             // setup connection to Resonite 
-            // used to set data back to Resonite world
-            while (true)
+            // used to send data back to Resonite world
+            while (!token.IsCancellationRequested)
             {
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
-
                 try
                 {
-                    resoniteSendServer = new HttpListener();
+                    sendServer = new HttpListener();
 
-                    resoniteSendServer.Prefixes.Add("http://localhost:5001/echo/");
-                    resoniteSendServer.Start();
+                    sendServer.Prefixes.Add($"http://localhost:{resonitePort}/echo/");
+                    sendServer.Start();
 
-                    var getContextTask = resoniteSendServer.GetContextAsync();
+                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    var getContextTask = sendServer.GetContextAsync();
                     var timeoutTask = Task.Delay(TimeSpan.FromSeconds(10), cts.Token);
 
                     var completed = await Task.WhenAny(getContextTask, timeoutTask);
@@ -124,7 +125,7 @@ namespace CalibrationEnv
                         Console.WriteLine("Connection to Resonite timed out.\n");
 
                         // stop listener! 
-                        resoniteSendServer.Stop();
+                        sendServer.Stop();
 
                         return;
                     }
@@ -140,7 +141,7 @@ namespace CalibrationEnv
                     }
 
                     HttpListenerWebSocketContext wsCtx = await ctx.AcceptWebSocketAsync(subProtocol: null);
-                    resoniteSendSocket = wsCtx.WebSocket;
+                    sendSocket = wsCtx.WebSocket;
 
                     Console.WriteLine("Connected to Resonite!\n");
                     break;
@@ -156,8 +157,47 @@ namespace CalibrationEnv
                     break;
                 }
             }
+        }
+        
+        protected override async Task Send(CancellationToken token)
+        {
+            // FIXME: returning when no socket setup
+            // since it can fail setting up rn and hold the whole app hostage
+            if (sendSocket == null)
+                return;
 
-            guid = GenerateId("resonite", "127.0.0.1", inputPort);
+            // RN: only send non-resonite users
+            // TODO: send non-resonite Objects too
+
+            // get update from world
+            WorldUpdate update = worldModel.GetWorldModel(Guid);
+
+            // send msg per user per bone to resonite to update users
+            // TODO: optimize by batching user data?
+            foreach (var user in update.users)
+            {
+                for (int i = 0; i < user.boneNames.Length; i++)
+                {
+                    var position = user.boneTransforms[i].position;
+                    var rotation = user.boneTransforms[i].rotation;
+
+                    var msg = string.Join(';', user.name, user.id, user.boneNames[i],
+                        position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z, rotation.W
+                    );
+
+                    await sendSocketLock.WaitAsync(token);
+                    try
+                    {
+                        await sendSocket.SendAsync(Encoding.UTF8.GetBytes(msg), WebSocketMessageType.Text, true, token);
+                    }
+                    finally
+                    {
+                        sendSocketLock.Release();
+                    }
+                }
+            }
+
+            await Task.Delay(33, token);   // TODO: Calculate how much is left to target 30fps (maybe have this as a setting)
         }
 
         public override void Receive(JsonElement msgRoot)
@@ -173,46 +213,6 @@ namespace CalibrationEnv
             worldModel.ApplyUpdate(WorldUpdateSource.Resonite, update);
         }
 
-        protected override async Task SendStep()
-        {
-            // FIXME: returning when no socket setup
-            // since it can fail setting up rn and hold the whole app hostage
-            if (resoniteSendSocket == null)
-                return;
-
-            // First only send non-resonite users
-            // Later send non-resonite Objects too
-
-            // get update from world
-            WorldUpdate update = worldModel.GetWorldModel(guid);
-
-            // send msg per user per bone to resonite to update users
-            foreach (var user in update.users)
-            {
-                for (int i = 0; i < user.boneNames.Length; i++)
-                {
-                    var position = user.boneTransforms[i].position;
-                    var rotation = user.boneTransforms[i].rotation;
-
-                    var msg = string.Join(';', user.name, user.id, user.boneNames[i],
-                        position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z, rotation.W
-                    );
-
-                    await socketLockResonite.WaitAsync();
-                    try
-                    {
-                        await resoniteSendSocket.SendAsync(Encoding.UTF8.GetBytes(msg), WebSocketMessageType.Text, true, CancellationToken.None);
-                    }
-                    finally
-                    {
-                        socketLockResonite.Release();
-                    }
-                }
-            }
-
-            await Task.Delay(33);   // Calculate how much is left to target 30fps (maybe have this as a setting)
-        }
-
         private async Task ReceiveLoop(CancellationToken token)
         {
             var buffer = new byte[BUFFER_SIZE];
@@ -221,22 +221,24 @@ namespace CalibrationEnv
             {
                 // get message by writing to memorystream as long
                 // as required to receive complete msg 
-                using var ms = new MemoryStream();
+                using var stream = new MemoryStream();
+
                 WebSocketReceiveResult result;
                 do
                 {
-                    result = await socketResoLink.ReceiveAsync(buffer, token);
+                    result = await receiveSocket.ReceiveAsync(buffer, token);
 
                     if (result.MessageType == WebSocketMessageType.Close)
                         return;
 
-                    ms.Write(buffer, 0, result.Count);
+                    stream.Write(buffer, 0, result.Count);
 
-                    if (ms.Length > MAX_MESSAGE_SIZE)
+                    if (stream.Length > MAX_MESSAGE_SIZE)
                         throw new InvalidOperationException("WebSocket message too large");
+
                 } while (!result.EndOfMessage);
 
-                string msg = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
+                string msg = Encoding.UTF8.GetString(stream.GetBuffer(), 0, (int)stream.Length);
 
                 // extract message ID from JSON and add to pending requests
                 string? msgId = ExtractMessageID(msg);
@@ -251,12 +253,9 @@ namespace CalibrationEnv
                     Console.WriteLine("Received untracked message: " + msg);
                 }
 
-                if (tcs != null)
-                {
-                    tcs.SetResult(msg);
-                }
+                tcs?.SetResult(msg);
 
-                await Task.Delay(1);
+                await Task.Delay(1, token);
             }
         }
 
@@ -266,7 +265,7 @@ namespace CalibrationEnv
             {
                 // get Root slot data 
                 var msg = BuildGetSlotMsg("Root", false);
-                string response = await SendRequestAsync(msg, "getSlot");
+                string response = await SendRequestAsync(msg, "getSlot", token);
 
                 // process response to extract child ID's and add to registered slots collection,
                 // which will be used to request childern slot data in batch
@@ -278,16 +277,12 @@ namespace CalibrationEnv
                 if (!CheckJSONResponse(jsonRoot, "slotData"))
                     return;
 
-                //Console.WriteLine("\nReceived Root response with ID: " + jsonRoot.GetProperty("sourceMessageId"));
-
                 // get core data 
                 var data = jsonRoot.GetProperty("data");
 
                 // get ID's from all children, 
                 // add to collection if not yet discovered
                 var children = data.GetProperty("children").EnumerateArray();
-
-                //Console.WriteLine("Data from Root response: " + children.ToList().Count + " children.\n" + data);
 
                 // check and add new slots if found
                 foreach (var child in children)
@@ -315,28 +310,25 @@ namespace CalibrationEnv
                 DateTime start = DateTime.Now;
 
                 // get a copy of the current registered slots to do batch operation on
-                List<string> snapshotRegisteredSlots;
-                snapshotRegisteredSlots = [.. registeredSlots.Keys];
-                
+                var snapshot = registeredSlots.Keys.ToList();
+
                 // do batch operation: get slot on all registered id's
-                var batchMsg = new DataModelOperationBatch();
-                batchMsg.MessageID = Guid.NewGuid().ToString();
-                batchMsg.Operations = new List<Message>();
-                foreach (var childID in snapshotRegisteredSlots)
+                var batchMsg = new DataModelOperationBatch
+                {
+                    MessageID = System.Guid.NewGuid().ToString(),
+                    Operations = []
+                };
+
+                foreach (var childID in snapshot)
                 {
                     batchMsg.Operations.Add(BuildGetSlotMsg(childID, true));
                 }
 
                 // wait to receive response
-                string response = await SendRequestAsync(batchMsg, "dataModelOperationBatch");
+                string response = await SendRequestAsync(batchMsg, "dataModelOperationBatch", token);
 
                 // get to core data from msg
                 var jsonRoot = JsonDocument.Parse(response).RootElement;
-                // Console.WriteLine("\nReceived Batch children response with ID: " + jsonRoot.GetProperty("sourceMessageId"));
-
-                var responses = jsonRoot.GetProperty("responses");
-
-                //Console.WriteLine("Data from Batch response: " + responses);
 
                 // error handling 
                 if (!CheckJSONResponse(jsonRoot, "batchResponse"))
@@ -369,26 +361,25 @@ namespace CalibrationEnv
             }
         }
 
-        private async Task<string> SendRequestAsync(Message msg, string type)
+        private async Task<string> SendRequestAsync(Message msg, string type, CancellationToken token)
         {
             var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             pendingRequests[msg.MessageID] = tcs;
 
             byte[] bytes = GetMsgAsByteArray(msg, type);
 
-            await socketLockResoLink.WaitAsync();
+            await receiveSocketLock.WaitAsync(token);
             try
             {
-                await socketResoLink.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None);
+                await receiveSocket.SendAsync(bytes, WebSocketMessageType.Text, true, token);
             }
             finally
             {
-                socketLockResoLink.Release();
+                receiveSocketLock.Release();
             }
 
             // wait for response with timeout
-            var completed = await Task.WhenAny(tcs.Task, Task.Delay(10000));
-
+            var completed = await Task.WhenAny(tcs.Task, Task.Delay(10000, token));
             if (completed != tcs.Task)
             {
                 pendingRequests.TryRemove(msg.MessageID, out _);
@@ -403,7 +394,7 @@ namespace CalibrationEnv
             // build message to get slot with give ID
             return new GetSlot
             {
-                MessageID = Guid.NewGuid().ToString(),
+                MessageID = System.Guid.NewGuid().ToString(),
                 SlotID = slotID,
                 IncludeComponentData = includeComponentData,
                 Depth = 0
@@ -552,9 +543,9 @@ namespace CalibrationEnv
             worldObject.id = id;
             worldObject.tag = tagValue;
             worldObject.name = nameToken == null ? "no_name" : nameToken;
-            worldObject.home = guid;
+            worldObject.home = Guid;
             worldObject.transform = transform;
-            worldObject.data = data.ToArray();
+            worldObject.data = [.. data];
 
             worldUpdate.objects.Add(worldObject);
         }

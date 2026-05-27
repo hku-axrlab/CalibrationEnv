@@ -14,16 +14,17 @@ namespace CalibrationEnv
         public ClientAdaptor(WorldModel worldModel, IWebSocketConnection? socket, string type) : base(worldModel)
         {
             this.socket = socket;
+
             if (socket != null)
-                this.guid = GenerateId(type, socket.ConnectionInfo.ClientIpAddress, (uint)socket.ConnectionInfo.ClientPort);
+                Guid = GenerateId(type, socket.ConnectionInfo.ClientIpAddress, (uint)socket.ConnectionInfo.ClientPort);
         }
 
-        protected override async Task SendStep()
+        protected override async Task Send(CancellationToken token)
         {
             if (socket != null && socket.IsAvailable)
             {
-                await socket.Send(worldModel.GetWorldModelJson(guid));
-                await Task.Delay(16);   // TODO: calculate how much longer we need to wait (should always be less than 16ms)
+                await socket.Send(worldModel.GetWorldModelJson(Guid));
+                await Task.Delay(16, token);   // TODO: calculate how much longer we need to wait (should always be less than 16ms)
             }
         }
 
@@ -31,6 +32,7 @@ namespace CalibrationEnv
         {
             WorldUpdate update = new();
 
+            // receive all users
             JsonElement users;
             if ( msgRoot.TryGetProperty("users", out users) )
             {
@@ -40,7 +42,7 @@ namespace CalibrationEnv
                 }
             }
             
-
+            // and then all objects
             JsonElement objects;
             if ( msgRoot.TryGetProperty("objects", out objects )) {
                 foreach (JsonElement objectJson in objects.EnumerateArray())
@@ -49,6 +51,7 @@ namespace CalibrationEnv
                 }
             }            
 
+            // and apply update to world model
             worldModel.ApplyUpdate(WorldUpdateSource.Client, update);
         }
 
@@ -56,9 +59,18 @@ namespace CalibrationEnv
         {
             UserData userData = new();
 
+            // parse basic info
             var name = userNode.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
             var id = userNode.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
 
+            // simple error handling - just skip users that don't have the required info, should be correct otherwise
+            if (name == null || id == null)
+            {
+                Console.WriteLine($"User parsed without name or id - won't be added. Name: [{name}], ID: [{id}].");
+                return;
+            }
+
+            // parse bone names
             var boneNamesElement = userNode.GetProperty("boneNames");
             List<string> boneNames = [];
             foreach (JsonElement node in boneNamesElement.EnumerateArray())
@@ -66,6 +78,7 @@ namespace CalibrationEnv
                 boneNames.Add(node.ToString());
             }
 
+            // parse bone transforms
             var boneTransformsElement = userNode.GetProperty("boneTransforms");
             List<Transform> boneTransforms = [];
             foreach (JsonElement node in boneTransformsElement.EnumerateArray())
@@ -96,20 +109,21 @@ namespace CalibrationEnv
                 boneTransforms.Add(new Transform(position, rotation, scale));
             }
 
-            // very simple error handling - really should just be correct
-            // otherwise, fix!
+            // very simple error handling - really should just be correct otherwise, fix it!
             if (boneTransforms.Count != boneNames.Count)
             {
                 Console.WriteLine($"User parsed with wrong bones - won't be added. {boneTransforms.Count} Transforms, but {boneNames.Count} names!");
                 return;
             }
 
+            // setup user
             userData.name = name;
             userData.id = id;
-            userData.home = guid;
+            userData.home = Guid;
             userData.boneNames = [.. boneNames];
             userData.boneTransforms = [.. boneTransforms];
 
+            // add user to update
             worldUpdate.users.Add(userData);
         }
 
@@ -117,11 +131,19 @@ namespace CalibrationEnv
         {
             WorldObject obj = new();
 
-            // TODO: Parse
+            // parse basic info
             var name = objectNode.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
             var id = objectNode.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
             var tag = objectNode.TryGetProperty("tag", out var tagProp) ? tagProp.GetString() : null;
 
+            // simple error handling - just skip objects that don't have the required info, should be correct otherwise
+            if (name == null || id == null || tag == null)
+            {
+                Console.WriteLine($"Object parsed without name, id, or tag - won't be added. Name: [{name}], ID: [{id}], Tag: [{tag}].");
+                return;
+            }
+
+            // parse transform
             var transformElement = objectNode.GetProperty("transform");
             var posElement = transformElement.GetProperty("position");
             var rotElement = transformElement.GetProperty("rotation");
@@ -146,27 +168,34 @@ namespace CalibrationEnv
                 scaleElement.GetProperty("z").GetSingle()
                 );
 
+            // parse optional extra data 
             var dataElements = objectNode.GetProperty("variables");
-            List<DataContainer> dataList = new List<DataContainer>(dataElements.GetArrayLength());
+            List<DataContainer> dataList = new(dataElements.GetArrayLength());
             foreach( JsonElement variable in dataElements.EnumerateArray())
             {
-                
                 string? dataName = variable.GetProperty("name").GetString();
                 string? dataType = variable.GetProperty("type").GetString();
                 JsonElement dataElement = variable.GetProperty("value");
 
-                DataContainer data = new DataContainer(dataType, dataName, dataElement.Clone());
+                // simple error handling - just skip variables that don't have the required info, should be correct otherwise
+                if (dataType == null || dataName == null)
+                {
+                    Console.WriteLine($"Object variable for {name} parsed without name or type - won't be added. Name: [{dataName}], Type: [{dataType}].");
+                    continue;
+                }
+
+                DataContainer data = new(dataType, dataName, dataElement.Clone());
                 dataList.Add(data);
             }
 
-            obj.home = guid;
+            obj.home = Guid;
             obj.name = name;
             obj.tag = tag;
             obj.id = id;
             obj.transform.position = position;
             obj.transform.rotation = rotation;
             obj.transform.scale = scale;
-            obj.data = dataList.ToArray();
+            obj.data = [.. dataList];
 
             worldUpdate.objects.Add(obj);
         }

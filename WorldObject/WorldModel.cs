@@ -11,30 +11,31 @@ namespace CalibrationEnv
 
         public WorldUpdate()
         {
-            objects = new List<WorldObject>();
-            users = new List<UserData>();
+            objects = [];
+            users = [];
         }
 	}
 
     internal class WorldModel
     {
         // collection of all objects & users in world, stored by ID for easy reference
-        private ConcurrentDictionary<string, WorldObject> objects = new ConcurrentDictionary<string, WorldObject>();
-        private ConcurrentDictionary<string, UserData> users = new ConcurrentDictionary<string, UserData>();
+        // TODO: improve accessing/removing/reading to ConDic by using TryAdd, TryRemove, TryGetValue, etc.
+        private readonly ConcurrentDictionary<string, WorldObject> objects = new();
+        private readonly ConcurrentDictionary<string, UserData> users = new();
 
-        private JsonSerializerOptions jsonOptions = new JsonSerializerOptions { IncludeFields = true };
+        private readonly JsonSerializerOptions jsonOptions = new() { IncludeFields = true };
 
-        public WorldModel()
+        public WorldModel() 
         {
 
         }
 
-        public void RemoveAllFor( string guid )
+        public void RemoveAllFor(string guid)
         {
             List<string> staleUsers = new List<string>();
             foreach( UserData user in users.Values )
             {
-                if ( user.home == guid )
+                if (user.home == guid)
                     staleUsers.Add(user.id);
             }
 
@@ -76,6 +77,8 @@ namespace CalibrationEnv
 
         public string GetWorldModelJson(string excludeFrom = "")
         {
+            // TODO: If serialization becomes expensive, consider offloading
+            // JsonSerializer.Serialize(...) to Task.Run to avoid blocking.
             return JsonSerializer.Serialize(GetWorldModel(excludeFrom), jsonOptions);
         }
 
