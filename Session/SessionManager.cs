@@ -10,7 +10,7 @@ namespace CalibrationEnv
         private readonly int clientPort = 4196;
 
         // adaptor handling communication with Resonite world
-        private readonly ResoniteAdaptor resoniteAdaptor;
+        private readonly ResoniteAdaptor? resoniteAdaptor;
 
         // connected clients collections, after connecting and messaging added to adaptors
         // to forward slot data responses to all connected clients
@@ -24,6 +24,8 @@ namespace CalibrationEnv
         // parsed to a more convenient format for our clients
         private readonly WorldModel worldModel;
 
+        private readonly bool usingResonite;
+
         public enum MessageType
         {
             Connect = 0,
@@ -31,20 +33,29 @@ namespace CalibrationEnv
             ClientData = 2
         }
 
-        public SessionManager()
+        public SessionManager(bool usingResonite)
         {
+            // set settings
+            this.usingResonite = usingResonite;
+
             // create new world model
             worldModel = new WorldModel();
 
-            // create resonite adaptor,
-            // which will handle communication with Resonite world and update world model accordingly
-            resoniteAdaptor = new ResoniteAdaptor(worldModel);
+            if (usingResonite)
+            {
+                // create resonite adaptor,
+                // which will handle communication with Resonite world and update world model accordingly
+                resoniteAdaptor = new ResoniteAdaptor(worldModel);
+            }
         }
 
         public async Task RunAsync(CancellationToken token)
         {
             // start up resonite adaptor to connect to Resonite world 
-            await resoniteAdaptor.StartAsync(token);
+            if (usingResonite && resoniteAdaptor != null)
+            {
+                await resoniteAdaptor.StartAsync(token);
+            }
 
             // start fleck websocket server to clients
             // clients will subscribe first via port, then send connect msg with client type,
@@ -161,7 +172,10 @@ namespace CalibrationEnv
             // token cancellation requested, shutting down 
             Console.WriteLine("Shutting down...");
 
-            await resoniteAdaptor.EndAsync();
+            if (usingResonite && resoniteAdaptor != null)
+            {
+                await resoniteAdaptor.EndAsync();
+            }
 
             var snapshot = adaptors.Values.ToList();
             foreach (var adaptor in snapshot)

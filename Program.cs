@@ -2,6 +2,8 @@
 {
     public class Program
     {
+        public const bool WITH_RESONITE = true;
+
         public static async Task Main()
         {
             // setup session manager
