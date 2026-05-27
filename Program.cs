@@ -8,7 +8,7 @@
         {
             // setup session manager
             // will handle adaptor connections and world updates 
-            var sessionManager = new SessionManager();
+            var sessionManager = new SessionManager(WITH_RESONITE);
 
             // setup central cancellation token source
             // to allow graceful shutdown on Ctrl+C
