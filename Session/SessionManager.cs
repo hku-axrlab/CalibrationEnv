@@ -24,8 +24,6 @@ namespace CalibrationEnv
         // parsed to a more convenient format for our clients
         private readonly WorldModel worldModel;
 
-        private readonly bool usingResonite;
-
         public enum MessageType
         {
             Connect = 0,
@@ -35,9 +33,6 @@ namespace CalibrationEnv
 
         public SessionManager(bool usingResonite)
         {
-            // set settings
-            this.usingResonite = usingResonite;
-
             // create new world model
             worldModel = new WorldModel();
 
@@ -52,7 +47,7 @@ namespace CalibrationEnv
         public async Task RunAsync(CancellationToken token)
         {
             // start up resonite adaptor to connect to Resonite world 
-            if (usingResonite && resoniteAdaptor != null)
+            if (resoniteAdaptor != null)
             {
                 await resoniteAdaptor.StartAsync(token);
             }
@@ -172,7 +167,7 @@ namespace CalibrationEnv
             // token cancellation requested, shutting down 
             Console.WriteLine("Shutting down...");
 
-            if (usingResonite && resoniteAdaptor != null)
+            if (resoniteAdaptor != null)
             {
                 await resoniteAdaptor.EndAsync();
             }
