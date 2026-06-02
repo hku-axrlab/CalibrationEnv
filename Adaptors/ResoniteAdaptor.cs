@@ -169,8 +169,16 @@ namespace CalibrationEnv
             // RN: only send non-resonite users
             // TODO: send non-resonite Objects too
 
+            Dictionary<string, WorldObject> remoteRoots = new Dictionary<string, WorldObject>();
+
             // get update from world
             WorldUpdate update = worldModel.GetWorldModel(Guid);
+
+            foreach( var obj in update.objects)
+            {
+                if (obj.tag == "vRoot")
+                    remoteRoots.Add(obj.home, obj);
+            }
 
             // send msg per user per bone to resonite to update users
             // TODO: optimize by batching user data?
@@ -180,6 +188,12 @@ namespace CalibrationEnv
                 {
                     var position = user.boneTransforms[i].position;
                     var rotation = user.boneTransforms[i].rotation;
+
+                    if ( remoteRoots.ContainsKey(user.home))
+                    {
+                        remoteRoots[user.home].transform.MakeRelative(ref position);
+                        remoteRoots[user.home].transform.MakeRelative(ref rotation);
+                    }
 
                     var msg = string.Join(';', user.name, user.id, user.boneNames[i],
                         position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z, rotation.W
