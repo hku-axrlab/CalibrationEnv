@@ -19,7 +19,7 @@ namespace CalibrationEnv
 
         // unique identifier for this adaptor,
         // generated on connect and used to identify client 
-        public string Guid { get; protected set; }
+        public string Guid { get; protected set; }      // TODO: rename to id, since it's not actually a GUID
 
         /// <summary>
         /// Constructor for Adaptor

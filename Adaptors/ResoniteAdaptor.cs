@@ -1,5 +1,6 @@
 ﻿using ResoniteLink;
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.WebSockets;
 using System.Numerics;
@@ -9,18 +10,21 @@ using System.Text.RegularExpressions;
 
 namespace CalibrationEnv
 {
-    // TODO: make stand-alone application. Launch with params --with-resonite.
-    internal class ResoniteAdaptor : Adaptor
+    internal class ResoniteAdaptor(WorldModel worldModel) : Adaptor(worldModel)
     {
         // receive - used for ResoniteLink connection to receive data from Resonite world
-        private ClientWebSocket receiveSocket;
+        private ClientWebSocket? receiveSocket;
         private readonly SemaphoreSlim receiveSocketLock = new(1, 1);
+        [MemberNotNullWhen(true, nameof(receiveSocket))]
+        private bool IsReceiveReady => receiveSocket != null && receiveSocket.State == WebSocketState.Open;
 
         // send - used for Resonite connection to send data to Resonite world
         private readonly int resonitePort = 5001;
-        private HttpListener sendServer;
-        private WebSocket sendSocket;
+        private HttpListener? sendServer;
+        private WebSocket? sendSocket;
         private readonly SemaphoreSlim sendSocketLock = new(1, 1);
+        [MemberNotNullWhen(true, nameof(sendSocket))]
+        private bool IsSendReady => sendSocket != null && sendSocket.State == WebSocketState.Open;
 
         // interval times for requesting slots from Resonite world, in ms
         protected readonly int rootMsgInterval = 1000;
@@ -40,11 +44,6 @@ namespace CalibrationEnv
         // NOTE: byte value always 0, just wanted ConcurrentDic pattern
         private readonly ConcurrentDictionary<string, byte> registeredSlots = [];
 
-        public ResoniteAdaptor(WorldModel worldModel) : base(worldModel) 
-        {
-            
-        }
-
         public override async Task StartAsync(CancellationToken token)
         {
             // setup connections to resonite
@@ -60,6 +59,15 @@ namespace CalibrationEnv
         }
 
         private async Task ConnectToResonite(CancellationToken token)
+        {
+            // setup connection to ResoniteLink, for receiving
+            await ConnectReceiveSocket(token);
+
+            // setup connection to Resonite, for sending
+            await ConnectSendSocket(token);
+        }
+
+        private async Task ConnectReceiveSocket(CancellationToken token)
         {
             uint inputPort;
 
@@ -77,7 +85,7 @@ namespace CalibrationEnv
                 }
 
                 // create new socket (per attempt, since it will break after failed attempt)
-                receiveSocket?.Dispose();
+                DisposeReceiveSocket();
                 receiveSocket = new ClientWebSocket();
 
                 // attempt connect with timeout
@@ -95,14 +103,23 @@ namespace CalibrationEnv
                 }
                 catch (OperationCanceledException)
                 {
+                    DisposeReceiveSocket();
+
                     Console.WriteLine("Connection to ResoniteLink timed out.\n");
+                    break;
                 }
                 catch (Exception ex)
                 {
+                    DisposeReceiveSocket();
+
                     Console.WriteLine($"Connection to ResoniteLink failed: {ex.Message}\n");
+                    break;
                 }
             }
+        }
 
+        private async Task ConnectSendSocket(CancellationToken token)
+        {
             // setup connection to Resonite 
             // used to send data back to Resonite world
             while (!token.IsCancellationRequested)
@@ -122,11 +139,9 @@ namespace CalibrationEnv
 
                     if (completed != getContextTask)
                     {
+                        DisposeSendSocket();
+
                         Console.WriteLine("Connection to Resonite timed out.\n");
-
-                        // stop listener! 
-                        sendServer.Stop();
-
                         return;
                     }
 
@@ -134,9 +149,12 @@ namespace CalibrationEnv
 
                     if (!ctx.Request.IsWebSocketRequest)
                     {
-                        Console.WriteLine($"Connection to Resonite failed: not a WebSocket Request.\n");
                         ctx.Response.StatusCode = 400;
                         ctx.Response.Close();
+
+                        DisposeSendSocket();
+
+                        Console.WriteLine($"Connection to Resonite failed: not a WebSocket Request.\n");
                         return;
                     }
 
@@ -148,22 +166,42 @@ namespace CalibrationEnv
                 }
                 catch (OperationCanceledException)
                 {
+                    DisposeSendSocket();
+
                     Console.WriteLine("Connection to Resonite timed out.\n");
                     break;
                 }
                 catch (Exception ex)
                 {
+                    DisposeSendSocket();
+
                     Console.WriteLine($"Connection to Resonite failed: {ex.Message}\n");
                     break;
                 }
             }
         }
-        
+
+        private void DisposeReceiveSocket()
+        {
+            var old = receiveSocket;
+            receiveSocket = null;
+            old?.Dispose();
+        }
+
+        private void DisposeSendSocket()
+        {
+            var old = sendSocket;
+            sendSocket = null;
+            old?.Dispose();
+
+            sendServer?.Stop();
+            sendServer = null;
+        }
+
         protected override async Task Send(CancellationToken token)
         {
-            // FIXME: returning when no socket setup
-            // since it can fail setting up rn and hold the whole app hostage
-            if (sendSocket == null)
+            // if can't send, return and wait for next interval to retry
+            if (!IsSendReady)
                 return;
 
             // RN: only send non-resonite users
@@ -199,10 +237,11 @@ namespace CalibrationEnv
                         position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z, rotation.W
                     );
 
+                    var socket = GetSendSocketOrThrow();
                     await sendSocketLock.WaitAsync(token);
                     try
                     {
-                        await sendSocket.SendAsync(Encoding.UTF8.GetBytes(msg), WebSocketMessageType.Text, true, token);
+                        await socket.SendAsync(Encoding.UTF8.GetBytes(msg), WebSocketMessageType.Text, true, token);
                     }
                     finally
                     {
@@ -233,14 +272,22 @@ namespace CalibrationEnv
 
             while (!token.IsCancellationRequested)
             {
+                // if can't receive, wait and retry
+                if (!IsReceiveReady)
+                {
+                    await Task.Delay(500, token);
+                    continue;
+                }
+
                 // get message by writing to memorystream as long
                 // as required to receive complete msg 
                 using var stream = new MemoryStream();
 
+                var socket = GetReceiveSocketOrThrow();
                 WebSocketReceiveResult result;
                 do
                 {
-                    result = await receiveSocket.ReceiveAsync(buffer, token);
+                    result = await socket.ReceiveAsync(buffer, token);
 
                     if (result.MessageType == WebSocketMessageType.Close)
                         return;
@@ -252,22 +299,19 @@ namespace CalibrationEnv
 
                 } while (!result.EndOfMessage);
 
-                string msg = Encoding.UTF8.GetString(stream.GetBuffer(), 0, (int)stream.Length);
+                string msg = Encoding.UTF8.GetString(stream.ToArray());
 
                 // extract message ID from JSON and add to pending requests
                 string? msgId = ExtractMessageID(msg);
-                TaskCompletionSource<string>? tcs = null;
 
-                if (msgId != null && pendingRequests.TryGetValue(msgId, out tcs))
+                if (msgId != null && pendingRequests.TryRemove(msgId, out var tcs))
                 {
-                    pendingRequests.TryRemove(msgId, out _);
+                    tcs.TrySetResult(msg);
                 }
                 else
                 {
                     Console.WriteLine("Received untracked message: " + msg);
                 }
-
-                tcs?.SetResult(msg);
 
                 await Task.Delay(1, token);
             }
@@ -277,6 +321,13 @@ namespace CalibrationEnv
         {
             while (!token.IsCancellationRequested)
             {
+                // if can't receive, wait and retry
+                if (!IsReceiveReady)
+                {
+                    await Task.Delay(500, token);
+                    continue;
+                }
+
                 // get Root slot data 
                 var msg = BuildGetSlotMsg("Root", false);
                 string response = await SendRequestAsync(msg, "getSlot", token);
@@ -321,6 +372,13 @@ namespace CalibrationEnv
         {
             while (!token.IsCancellationRequested)
             {
+                // if can't receive, wait and retry
+                if (!IsReceiveReady)
+                {
+                    await Task.Delay(500, token);
+                    continue;
+                }
+
                 DateTime start = DateTime.Now;
 
                 // get a copy of the current registered slots to do batch operation on
@@ -346,7 +404,7 @@ namespace CalibrationEnv
 
                 // error handling 
                 if (!CheckJSONResponse(jsonRoot, "batchResponse"))
-                    return;
+                    continue;
 
                 Receive(jsonRoot);
 
@@ -377,15 +435,25 @@ namespace CalibrationEnv
 
         private async Task<string> SendRequestAsync(Message msg, string type, CancellationToken token)
         {
-            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            pendingRequests[msg.MessageID] = tcs;
+            // if can't receive, throw exception,
+            // shouldn't get here since loops check before sending, but just in case
+            if (!IsReceiveReady)
+            {
+                throw new InvalidOperationException("Resonite socket not connected.");
+            }
 
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            if (!pendingRequests.TryAdd(msg.MessageID, tcs))
+                throw new InvalidOperationException("Duplicate message id");
+            
             byte[] bytes = GetMsgAsByteArray(msg, type);
 
+            var socket = GetReceiveSocketOrThrow();
             await receiveSocketLock.WaitAsync(token);
             try
             {
-                await receiveSocket.SendAsync(bytes, WebSocketMessageType.Text, true, token);
+                await socket.SendAsync(bytes, WebSocketMessageType.Text, true, token);
             }
             finally
             {
@@ -396,7 +464,9 @@ namespace CalibrationEnv
             var completed = await Task.WhenAny(tcs.Task, Task.Delay(10000, token));
             if (completed != tcs.Task)
             {
-                pendingRequests.TryRemove(msg.MessageID, out _);
+                if (pendingRequests.TryRemove(msg.MessageID, out var removed))
+                    removed.TrySetCanceled(token);
+
                 throw new TimeoutException("No response received");
             }
 
@@ -562,6 +632,26 @@ namespace CalibrationEnv
             worldObject.data = [.. data];
 
             worldUpdate.objects.Add(worldObject);
+        }
+
+        private ClientWebSocket GetReceiveSocketOrThrow()
+        {
+            var socket = receiveSocket;
+
+            if (socket == null || socket.State != WebSocketState.Open)
+                throw new InvalidOperationException("Receive socket not connected.");
+
+            return socket;
+        }
+
+        private WebSocket GetSendSocketOrThrow()
+        {
+            var socket = sendSocket;
+
+            if (socket == null || socket.State != WebSocketState.Open)
+                throw new InvalidOperationException("Send socket not connected.");
+
+            return socket;
         }
         #endregion
     }

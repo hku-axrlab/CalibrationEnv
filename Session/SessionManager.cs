@@ -65,14 +65,7 @@ namespace CalibrationEnv
                 {
                     actionQueue.Enqueue(async() =>
                     {
-                        if (clients.TryAdd(id, socket))
-                        {
-                            Console.WriteLine($"Client {id} connected");
-                        }
-                        else
-                        {
-                            Console.WriteLine($"Client {id} couldn't connect");
-                        }
+                        HandleConnect(socket);
                     });
                 };
 
@@ -81,20 +74,7 @@ namespace CalibrationEnv
                 {
                     actionQueue.Enqueue(async () =>
                     {
-                        // remove clients 
-                        clients.TryRemove(id, out _);
-
-                        // try to remove matching adaptor, and if found,
-                        // remove all data related to client from world model
-                        if (adaptors.TryRemove(id, out var adaptor))
-                        {
-                            worldModel.RemoveAllFor(adaptor.Guid);
-                            Console.WriteLine($"Client {id} disconnected");
-                        }
-                        else
-                        {
-                            Console.WriteLine($"Client {id} disconnected. But data not properly removed, didn't find adaptor");
-                        }
+                        HandleDisconnect(socket);
                     });
                 };
 
@@ -258,6 +238,41 @@ namespace CalibrationEnv
 
             // return success
             return true;
+        }
+
+        private void HandleConnect(IWebSocketConnection socket)
+        {
+            var id = socket.ConnectionInfo.Id;
+
+            // attempt to add client to clients 
+            if (clients.TryAdd(id, socket))
+            {
+                Console.WriteLine($"Client {id} connected");
+            }
+            else
+            {
+                Console.WriteLine($"Client {id} couldn't connect");
+            }
+        }
+
+        private void HandleDisconnect(IWebSocketConnection socket)
+        {
+            var id = socket.ConnectionInfo.Id;
+
+            // remove clients 
+            clients.TryRemove(id, out _);
+
+            // try to remove matching adaptor, and if found,
+            // remove all data related to client from world model
+            if (adaptors.TryRemove(id, out var adaptor))
+            {
+                worldModel.RemoveAllFor(adaptor.Guid);
+                Console.WriteLine($"Client {id} disconnected");
+            }
+            else
+            {
+                Console.WriteLine($"Client {id} disconnected. But data not properly removed, didn't find adaptor");
+            }
         }
     }
 }
