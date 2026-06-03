@@ -8,6 +8,7 @@ using System.Numerics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace CalibrationEnv
 {
@@ -372,7 +373,7 @@ namespace CalibrationEnv
                 var start = Stopwatch.GetTimestamp();
 
                 // get Root slot data 
-                var msg = BuildGetSlotMsg("Root", false);
+                var msg = BuildGetSlotMsg("Root", false, 0);
                 string response = await SendRequestAsync(msg, "getSlot", token);
 
                 // process response to extract child ID's and add to registered slots collection,
@@ -401,7 +402,13 @@ namespace CalibrationEnv
                     var childTag = child.GetProperty("tag").GetProperty("value").GetString();
 
                     if (string.IsNullOrEmpty(childTag) || string.IsNullOrEmpty(childID))
+                    {
+                        // Check if this is a user or not
+                        var name = child.GetProperty("name").GetProperty("value").GetString()!;
+                        if (name.StartsWith("User"))
+                            registeredSlots.TryAdd(childID, 1);
                         continue;
+                    }
 
                     registeredSlots.TryAdd(childID, 0);
                 }
@@ -438,7 +445,7 @@ namespace CalibrationEnv
 
                 foreach (var childID in snapshot)
                 {
-                    batchMsg.Operations.Add(BuildGetSlotMsg(childID, true));
+                    batchMsg.Operations.Add(BuildGetSlotMsg(childID, true, (int)registeredSlots[childID]));
                 }
 
                 // wait to receive response
@@ -515,7 +522,7 @@ namespace CalibrationEnv
             return await tcs.Task;
         }
 
-        private GetSlot BuildGetSlotMsg(string slotID, bool includeComponentData)
+        private GetSlot BuildGetSlotMsg(string slotID, bool includeComponentData, int depth )
         {
             // build message to get slot with give ID
             return new GetSlot
@@ -523,7 +530,7 @@ namespace CalibrationEnv
                 MessageID = System.Guid.NewGuid().ToString(),
                 SlotID = slotID,
                 IncludeComponentData = includeComponentData,
-                Depth = 0
+                Depth = depth
             };
         }
 
@@ -581,15 +588,27 @@ namespace CalibrationEnv
                 }
 
                 // set field world object 
+                var objID = match.Groups["id"].Value;
+
                 worldObject.id = match.Groups["id"].Value;
                 worldObject.markedForRemoval = true;
 
+                if (registeredSlots[objID] == 0) // object
+                {
+                    worldObject.id = match.Groups["id"].Value;
+                    worldObject.markedForRemoval = true;
+
+                    // do still add to the update, 
+                    // since removing the object is in fact an update! 
+                    worldUpdate.objects.Add(worldObject);
+                }
+                else // user
+                {
+                    
+                }
+
                 // remove from registered slots so we stop requesting updates  
                 registeredSlots.TryRemove(worldObject.id, out _);
-
-                // do still add to the update, 
-                // since removing the object is in fact an update! 
-                worldUpdate.objects.Add(worldObject);
 
                 return;
             }
@@ -598,19 +617,110 @@ namespace CalibrationEnv
             var id = dataElement.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
             var nameToken = dataElement.TryGetProperty("name", out var nameProp) && nameProp.TryGetProperty("value", out var nameVal) ? nameVal.GetString() : null;
             var tagToken = dataElement.TryGetProperty("tag", out var tagProp) && tagProp.TryGetProperty("value", out var tagVal) ? tagVal : (JsonElement?)null;
-            var posToken = dataElement.TryGetProperty("position", out var posProp) && posProp.TryGetProperty("value", out var posVal) ? posVal : (JsonElement?)null;
-            var rotToken = dataElement.TryGetProperty("rotation", out var rotProp) && rotProp.TryGetProperty("value", out var rotVal) ? rotVal : (JsonElement?)null;
-            var scaleToken = dataElement.TryGetProperty("scale", out var scaleProp) && scaleProp.TryGetProperty("value", out var scaleVal) ? scaleVal : (JsonElement?)null;
+            // var posToken = dataElement.TryGetProperty("position", out var posProp) && posProp.TryGetProperty("value", out var posVal) ? posVal : (JsonElement?)null;
+            // var rotToken = dataElement.TryGetProperty("rotation", out var rotProp) && rotProp.TryGetProperty("value", out var rotVal) ? rotVal : (JsonElement?)null;
+            // var scaleToken = dataElement.TryGetProperty("scale", out var scaleProp) && scaleProp.TryGetProperty("value", out var scaleVal) ? scaleVal : (JsonElement?)null;
 
             // Skip if no id and/or tag
             var tagValue = tagToken?.GetString() ?? "Untagged";
+            if ( nameToken.StartsWith("User") && tagValue == "Untagged")
+            {
+                // Parse as a user!
+                ParseUser(ref worldUpdate);
+                return;
+            }
             if (id != "Root" && (id == null || string.IsNullOrEmpty(tagValue))) return;
 
-            // Process transform
+            ParseObject(ref worldUpdate);
+
+            void ParseObject( ref WorldUpdate worldUpdate)
+            {
+                Transform transform = ReadTransformFromSlot(dataElement);
+
+                // Process components for variable data
+                List<DataContainer> data = new List<DataContainer>();
+                JsonElement components = dataElement.GetProperty("components");
+                foreach (JsonElement component in components.EnumerateArray())
+                {
+                    //slotNode.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+                    var type = component.GetProperty("componentType").GetString();
+                    if (type.Contains("DynamicValueVariable<"))
+                    {
+                        JsonElement members = component.GetProperty("members");
+
+                        // Get the variable from the template <>
+                        int start = type.IndexOf("<");
+                        int end = type.IndexOf(">");
+                        string? inner = (start != -1 && end != -1 && end > start) ? type.Substring(start + 1, end - start - 1) : null;
+
+                        string varType = inner == null ? "" : inner;
+                        string? varName = members.GetProperty("VariableName").GetProperty("value").GetString();
+                        JsonElement varValue = members.GetProperty("Value").GetProperty("value");
+
+                        if (varName == null) continue;
+
+                        data.Add(new DataContainer(varType, varName, varValue.Clone()));
+                    }
+                }
+
+                worldObject.id = id;
+                worldObject.tag = tagValue;
+                worldObject.name = nameToken == null ? "no_name" : nameToken;
+                worldObject.home = Id;
+                worldObject.transform = transform;
+                worldObject.data = [.. data];
+                worldUpdate.objects.Add(worldObject);
+            }
+
+            void ParseUser( ref WorldUpdate worldUpdate)
+            {
+                // Get Head, Left Hand & Right Hand
+                UserData user = new();
+                user.id = id;
+                user.name = nameToken;
+                user.home = Id;
+                user.boneTransforms = new Transform[3];
+                user.boneNames = new string[3];
+
+                Transform root = ReadTransformFromSlot(dataElement);
+
+                var children = dataElement.GetProperty("children").EnumerateArray();
+                foreach( var child in children )
+                {
+                    switch(child.GetProperty("name").GetProperty("value").ToString())
+                    {
+                        case "Head":
+                            user.boneTransforms[0] = ReadTransformFromSlot(child);
+                            user.boneTransforms[0].position += root.position;
+                            user.boneNames[0] = "Head";
+                            break;
+                        case "Left Hand":
+                            user.boneTransforms[1] = ReadTransformFromSlot(child);
+                            user.boneTransforms[1].position += root.position;
+                            user.boneNames[1] = "LHand";
+                            break;
+                        case "Right Hand":
+                            user.boneTransforms[2] = ReadTransformFromSlot(child);
+                            user.boneTransforms[2].position += root.position;
+                            user.boneNames[2] = "RHand";
+                            break;
+                    }
+                }
+
+                worldUpdate.users.Add(user);
+            }
+        }
+
+        private Transform ReadTransformFromSlot( JsonElement slot )
+        {
             Transform transform = new();
             Vector3 position;
             Quaternion rotation;
             Vector3 scale;
+
+            var posToken = slot.TryGetProperty("position", out var posProp) && posProp.TryGetProperty("value", out var posVal) ? posVal : (JsonElement?)null;
+            var rotToken = slot.TryGetProperty("rotation", out var rotProp) && rotProp.TryGetProperty("value", out var rotVal) ? rotVal : (JsonElement?)null;
+            var scaleToken = slot.TryGetProperty("scale", out var scaleProp) && scaleProp.TryGetProperty("value", out var scaleVal) ? scaleVal : (JsonElement?)null;
 
             if (posToken.HasValue)
             {
@@ -640,40 +750,7 @@ namespace CalibrationEnv
                 transform.scale = scale;
             }
 
-            // Process components for variable data
-            List<DataContainer> data = new List<DataContainer>();
-            JsonElement components = dataElement.GetProperty("components");
-            foreach (JsonElement component in components.EnumerateArray())
-            {
-                //slotNode.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
-                var type = component.GetProperty("componentType").GetString();
-                if (type.Contains("DynamicValueVariable<"))
-                {
-                    JsonElement members = component.GetProperty("members");
-
-                    // Get the variable from the template <>
-                    int start = type.IndexOf("<");
-                    int end = type.IndexOf(">");
-                    string? inner = (start != -1 && end != -1 && end > start) ? type.Substring(start + 1, end - start - 1) : null;
-
-                    string varType = inner == null ? "" : inner;
-                    string? varName = members.GetProperty("VariableName").GetProperty("value").GetString();
-                    JsonElement varValue = members.GetProperty("Value").GetProperty("value");
-
-                    if (varName == null) continue;
-
-                    data.Add(new DataContainer(varType, varName, varValue.Clone()));
-                }
-            }
-
-            worldObject.id = id;
-            worldObject.tag = tagValue;
-            worldObject.name = nameToken == null ? "no_name" : nameToken;
-            worldObject.home = Id;
-            worldObject.transform = transform;
-            worldObject.data = [.. data];
-
-            worldUpdate.objects.Add(worldObject);
+            return transform;
         }
 
         private ClientWebSocket GetReceiveSocketOrThrow()

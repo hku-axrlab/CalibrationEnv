@@ -80,7 +80,6 @@ namespace CalibrationEnv
 
         public void MakeRelative( ref Vector3 position )
         {
-            position -= this.position;
             position = RotateVector(position - this.position, rotation);
         }
 
