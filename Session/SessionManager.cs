@@ -266,7 +266,7 @@ namespace CalibrationEnv
             // remove all data related to client from world model
             if (adaptors.TryRemove(id, out var adaptor))
             {
-                worldModel.RemoveAllFor(adaptor.Guid);
+                worldModel.RemoveAllFor(adaptor.Id);
                 Console.WriteLine($"Client {id} disconnected");
             }
             else

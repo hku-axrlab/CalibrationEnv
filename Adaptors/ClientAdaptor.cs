@@ -1,4 +1,6 @@
 ﻿using Fleck;
+using System.Diagnostics.CodeAnalysis;
+using System.Net.WebSockets;
 using System.Numerics;
 using System.Text.Json;
 
@@ -9,23 +11,24 @@ namespace CalibrationEnv
         // reference to connected socket
         private readonly IWebSocketConnection? socket;
 
-        protected override int GetSendInterval() => 17;
+        [MemberNotNullWhen(true, nameof(socket))]
+        protected override bool IsSendReady => socket != null && socket.IsAvailable;
 
         public ClientAdaptor(WorldModel worldModel, IWebSocketConnection? socket, string type) : base(worldModel)
         {
             this.socket = socket;
 
             if (socket != null)
-                Guid = GenerateId(type, socket.ConnectionInfo.ClientIpAddress, (uint)socket.ConnectionInfo.ClientPort);
+                Id = GenerateId(type, socket.ConnectionInfo.ClientIpAddress, (uint)socket.ConnectionInfo.ClientPort);
         }
 
         protected override async Task Send(CancellationToken token)
         {
-            if (socket != null && socket.IsAvailable)
-            {
-                await socket.Send(worldModel.GetWorldModelJson(Guid));
-                await Task.Delay(16, token);   // TODO: calculate how much longer we need to wait (should always be less than 16ms)
-            }
+            // if can't send, return and wait for next interval to retry
+            if (!IsSendReady)
+                return;
+
+            await socket.Send(worldModel.GetWorldModelJson(Id));
         }
 
         public override void Receive(JsonElement msgRoot)
@@ -119,7 +122,7 @@ namespace CalibrationEnv
             // setup user
             userData.name = name;
             userData.id = id;
-            userData.home = Guid;
+            userData.home = Id;
             userData.boneNames = [.. boneNames];
             userData.boneTransforms = [.. boneTransforms];
 
@@ -188,7 +191,7 @@ namespace CalibrationEnv
                 dataList.Add(data);
             }
 
-            obj.home = Guid;
+            obj.home = Id;
             obj.name = name;
             obj.tag = tag;
             obj.id = id;

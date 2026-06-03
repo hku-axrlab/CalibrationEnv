@@ -1,4 +1,5 @@
-﻿using System.Net;
+﻿using System.Diagnostics;
+using System.Net;
 using System.Text.Json;
 
 namespace CalibrationEnv
@@ -19,7 +20,13 @@ namespace CalibrationEnv
 
         // unique identifier for this adaptor,
         // generated on connect and used to identify client 
-        public string Guid { get; protected set; }      // TODO: rename to id, since it's not actually a GUID
+        public string Id { get; protected set; }      
+
+        // default send rate of ~60fps, can be overridden by subclasses
+        protected virtual int SendIntervalMs => 16; 
+
+        // state of send socket
+        protected abstract bool IsSendReady { get; }
 
         /// <summary>
         /// Constructor for Adaptor
@@ -28,7 +35,7 @@ namespace CalibrationEnv
         public Adaptor(WorldModel worldModel)
         {
             this.worldModel = worldModel;
-            this.Guid = "";
+            this.Id = "";
         }
 
         /// <summary>
@@ -44,6 +51,11 @@ namespace CalibrationEnv
             // return success
             return Task.CompletedTask;
         }
+        
+        public async Task EndAsync()
+        {
+            await Task.WhenAll(tasks);
+        }
 
         /// <summary>
         /// Runs async on interval client wants to receive messages.
@@ -54,6 +66,10 @@ namespace CalibrationEnv
         {
             while (!token.IsCancellationRequested)
             {
+                // get start time for this function
+                // to account for time spent here when waiting for next interval
+                var start = Stopwatch.GetTimestamp();
+
                 try
                 {
                     await Send(token);
@@ -63,13 +79,12 @@ namespace CalibrationEnv
                     Console.WriteLine($"SendLoop error: {ex.Message} {ex.StackTrace}");
                 }
 
-                await Task.Delay(GetSendInterval(), token);
+                // wait remaining time in interval, accounting for time spent processing
+                await DelayRemainingAsync(start, SendIntervalMs, token);
             }
         }
 
         protected abstract Task Send(CancellationToken token);
-
-        protected abstract int GetSendInterval();
 
         /// <summary>
         /// Called when receiving msg from client. 
@@ -78,9 +93,23 @@ namespace CalibrationEnv
         /// <param name="msgRoot">JSONElement containing the root of the message.</param>
         public abstract void Receive(JsonElement msgRoot);
 
-        public async Task EndAsync()
+        /// <summary>
+        /// Helper function to delay for the remaining time in the send interval, 
+        /// accounting for time already spent processing.
+        /// </summary>
+        /// <param name="startTimestamp">Start timestamp</param>
+        /// <param name="intervalMs">Interval in milliseconds</param>
+        /// <param name="token">Cancellation token</param>
+        /// <returns></returns>
+        protected static async Task DelayRemainingAsync(long startTimestamp, int intervalMs, CancellationToken token)
         {
-            await Task.WhenAll(tasks);
+            // calculate time elapsed since start
+            // use of stopwatch ticks allows for more accurate and stable timing 
+            // gives ticks which are calculated to ms based on frequency
+            var elapsedMs = (Stopwatch.GetTimestamp() - startTimestamp) * 1000.0 / Stopwatch.Frequency;
+
+            // wait remaining time in interval, if any
+            await Task.Delay(Math.Max(intervalMs - (int)elapsedMs, 0), token);
         }
 
         /// <summary>

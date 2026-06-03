@@ -1,5 +1,6 @@
 ﻿using ResoniteLink;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.WebSockets;
@@ -24,12 +25,11 @@ namespace CalibrationEnv
         private WebSocket? sendSocket;
         private readonly SemaphoreSlim sendSocketLock = new(1, 1);
         [MemberNotNullWhen(true, nameof(sendSocket))]
-        private bool IsSendReady => sendSocket != null && sendSocket.State == WebSocketState.Open;
+        protected override bool IsSendReady => sendSocket != null && sendSocket.State == WebSocketState.Open;
 
         // interval times for requesting slots from Resonite world, in ms
-        protected readonly int rootMsgInterval = 1000;
-        protected readonly int childMsgInterval = 17;
-        protected override int GetSendInterval() => 17;
+        protected readonly int RequestRootIntervalMs = 1000;
+        protected readonly int RequestChildIntervalMs = 16;
 
         private const int MAX_MESSAGE_SIZE = 1024 * 1024; // 1 MB
         private const int BUFFER_SIZE = 8192;
@@ -96,7 +96,7 @@ namespace CalibrationEnv
                 {
                     await receiveSocket.ConnectAsync(new Uri($"ws://localhost:{inputPort}"), cts.Token);
 
-                    Guid = GenerateId("resonite", "127.0.0.1", inputPort);
+                    Id = GenerateId("resonite", "127.0.0.1", inputPort);
                     Console.WriteLine("Connected to ResoniteLink!\n");
 
                     break;
@@ -210,7 +210,7 @@ namespace CalibrationEnv
             Dictionary<string, WorldObject> remoteRoots = new Dictionary<string, WorldObject>();
 
             // get update from world
-            WorldUpdate update = worldModel.GetWorldModel(Guid);
+            WorldUpdate update = worldModel.GetWorldModel(Id);
 
             foreach( var obj in update.objects)
             {
@@ -249,8 +249,6 @@ namespace CalibrationEnv
                     }
                 }
             }
-
-            await Task.Delay(33, token);   // TODO: Calculate how much is left to target 30fps (maybe have this as a setting)
         }
 
         public override void Receive(JsonElement msgRoot)
@@ -328,6 +326,10 @@ namespace CalibrationEnv
                     continue;
                 }
 
+                // get start time for this function
+                // to account for time spent here when waiting for next interval
+                var start = Stopwatch.GetTimestamp();
+
                 // get Root slot data 
                 var msg = BuildGetSlotMsg("Root", false);
                 string response = await SendRequestAsync(msg, "getSlot", token);
@@ -363,8 +365,8 @@ namespace CalibrationEnv
                     registeredSlots.TryAdd(childID, 0);
                 }
 
-                // wait 
-                await Task.Delay(rootMsgInterval, token);
+                // wait remaining time in interval, accounting for time spent processing
+                await DelayRemainingAsync(start, RequestRootIntervalMs, token);
             }
         }
 
@@ -379,7 +381,9 @@ namespace CalibrationEnv
                     continue;
                 }
 
-                DateTime start = DateTime.Now;
+                // get start time for this function
+                // to account for time spent here when waiting for next interval
+                var start = Stopwatch.GetTimestamp();
 
                 // get a copy of the current registered slots to do batch operation on
                 var snapshot = registeredSlots.Keys.ToList();
@@ -387,7 +391,7 @@ namespace CalibrationEnv
                 // do batch operation: get slot on all registered id's
                 var batchMsg = new DataModelOperationBatch
                 {
-                    MessageID = System.Guid.NewGuid().ToString(),
+                    MessageID = Guid.NewGuid().ToString(),
                     Operations = []
                 };
 
@@ -408,11 +412,8 @@ namespace CalibrationEnv
 
                 Receive(jsonRoot);
 
-                // Make sure we account for the time the request took, so we don't introduce unnecessary delay
-                TimeSpan spent = DateTime.Now - start;
-
-                // wait for childMsgInterval minus time spent here
-                await Task.Delay(Math.Max(childMsgInterval - (int)spent.TotalMilliseconds, 0), token);
+                // wait remaining time in interval, accounting for time spent processing
+                await DelayRemainingAsync(start, RequestChildIntervalMs, token);
             }
         }
 
@@ -627,7 +628,7 @@ namespace CalibrationEnv
             worldObject.id = id;
             worldObject.tag = tagValue;
             worldObject.name = nameToken == null ? "no_name" : nameToken;
-            worldObject.home = Guid;
+            worldObject.home = Id;
             worldObject.transform = transform;
             worldObject.data = [.. data];
 
