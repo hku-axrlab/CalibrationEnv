@@ -222,7 +222,7 @@ namespace CalibrationEnv
         /// <param name="socket">The WebSocket connection of the client.</param>
         /// <param name="msgRoot">The root element of the JSON message.</param>
         /// <returns>The created ClientAdaptor if successful, otherwise null.</returns>
-        private ClientAdaptor? ProcessConnectMsg(IWebSocketConnection socket, JsonElement msgRoot)
+        private Adaptor? ProcessConnectMsg(IWebSocketConnection socket, JsonElement msgRoot)
         {
             // check if correct message format
             if (!msgRoot.TryGetProperty("clientType", out var clientType))
@@ -245,12 +245,13 @@ namespace CalibrationEnv
                 sendInterval = 33; // default to ~30 fps
             }
 
-            // create adaptor
-            ClientAdaptor? adaptor = null;
+			// create adaptor
+			Adaptor? adaptor = null;
             switch (clientTypeStr)
             {
                 case "unity":
                 case "unreal":
+                case "python":
                     adaptor = new ClientAdaptor(worldModel, socket, clientTypeStr, sendInterval);
                     break;
                 default:

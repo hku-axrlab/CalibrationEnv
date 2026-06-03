@@ -35,8 +35,9 @@ namespace CalibrationEnv
         public Adaptor(WorldModel worldModel, int sendIntervalMs)
         {
             this.worldModel = worldModel;
-            
-            Id = "";
+            this.sendIntervalMs = sendIntervalMs;
+
+			Id = "";
         }
 
         /// <summary>
