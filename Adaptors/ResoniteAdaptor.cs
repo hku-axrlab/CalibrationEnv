@@ -18,6 +18,7 @@ namespace CalibrationEnv
         private readonly SemaphoreSlim receiveSocketLock = new(1, 1);
         [MemberNotNullWhen(true, nameof(receiveSocket))]
         private bool IsReceiveReady => receiveSocket != null && receiveSocket.State == WebSocketState.Open;
+        private bool disconnectReceivePrinted = false;
 
         // send - used for Resonite connection to send data to Resonite world
         private readonly int resonitePort = 5001;
@@ -26,6 +27,7 @@ namespace CalibrationEnv
         private readonly SemaphoreSlim sendSocketLock = new(1, 1);
         [MemberNotNullWhen(true, nameof(sendSocket))]
         protected override bool IsSendReady => sendSocket != null && sendSocket.State == WebSocketState.Open;
+        private bool disconnectSendPrinted = false;
 
         // interval times for requesting slots from Resonite world, in ms
         protected readonly int RequestRootIntervalMs = 1000;
@@ -97,7 +99,11 @@ namespace CalibrationEnv
                     await receiveSocket.ConnectAsync(new Uri($"ws://localhost:{inputPort}"), cts.Token);
 
                     Id = GenerateId("resonite", "127.0.0.1", inputPort);
-                    Console.WriteLine("Connected to ResoniteLink!\n");
+
+                    // set print state to false so it will reprint on a new disconnect
+                    disconnectReceivePrinted = false;
+
+                    Console.WriteLine("Connected to ResoniteLink!");
 
                     break;
                 }
@@ -161,6 +167,9 @@ namespace CalibrationEnv
                     HttpListenerWebSocketContext wsCtx = await ctx.AcceptWebSocketAsync(subProtocol: null);
                     sendSocket = wsCtx.WebSocket;
 
+                    // set print state to false so it will reprint on a new disconnect
+                    disconnectSendPrinted = false;
+
                     Console.WriteLine("Connected to Resonite!\n");
                     break;
                 }
@@ -185,6 +194,7 @@ namespace CalibrationEnv
         {
             var old = receiveSocket;
             receiveSocket = null;
+            old?.Abort();
             old?.Dispose();
         }
 
@@ -192,6 +202,7 @@ namespace CalibrationEnv
         {
             var old = sendSocket;
             sendSocket = null;
+            old?.Abort();
             old?.Dispose();
 
             sendServer?.Stop();
@@ -202,7 +213,15 @@ namespace CalibrationEnv
         {
             // if can't send, return and wait for next interval to retry
             if (!IsSendReady)
+            {
+                if (!disconnectSendPrinted)
+                {
+                    disconnectSendPrinted = true;
+                    Console.WriteLine("Send connection to Resonite lost.");
+                }
+
                 return;
+            }
 
             // RN: only send non-resonite users
             // TODO: send non-resonite Objects too
@@ -212,7 +231,7 @@ namespace CalibrationEnv
             // get update from world
             WorldUpdate update = worldModel.GetWorldModel(Id);
 
-            foreach( var obj in update.objects)
+            foreach (var obj in update.objects)
             {
                 if (obj.tag == "vRoot")
                     remoteRoots.Add(obj.home, obj);
@@ -227,7 +246,7 @@ namespace CalibrationEnv
                     var position = user.boneTransforms[i].position;
                     var rotation = user.boneTransforms[i].rotation;
 
-                    if ( remoteRoots.ContainsKey(user.home))
+                    if (remoteRoots.ContainsKey(user.home))
                     {
                         remoteRoots[user.home].transform.MakeRelative(ref position);
                         remoteRoots[user.home].transform.MakeRelative(ref rotation);
@@ -273,42 +292,64 @@ namespace CalibrationEnv
                 // if can't receive, wait and retry
                 if (!IsReceiveReady)
                 {
+                    if (!disconnectReceivePrinted)
+                    {
+                        disconnectReceivePrinted = true;
+                        Console.WriteLine("Receive connection to Resonite lost.");
+                    }
+
                     await Task.Delay(500, token);
                     continue;
                 }
 
-                // get message by writing to memorystream as long
-                // as required to receive complete msg 
-                using var stream = new MemoryStream();
-
-                var socket = GetReceiveSocketOrThrow();
-                WebSocketReceiveResult result;
-                do
+                try
                 {
-                    result = await socket.ReceiveAsync(buffer, token);
+                    // get message by writing to memorystream as long
+                    // as required to receive complete msg 
+                    using var stream = new MemoryStream();
 
-                    if (result.MessageType == WebSocketMessageType.Close)
-                        return;
+                    var socket = GetReceiveSocketOrThrow();
+                    WebSocketReceiveResult result;
+                    do
+                    {
+                        result = await socket.ReceiveAsync(buffer, token);
 
-                    stream.Write(buffer, 0, result.Count);
+                        if (result.MessageType == WebSocketMessageType.Close)
+                            return;
 
-                    if (stream.Length > MAX_MESSAGE_SIZE)
-                        throw new InvalidOperationException("WebSocket message too large");
+                        stream.Write(buffer, 0, result.Count);
 
-                } while (!result.EndOfMessage);
+                        if (stream.Length > MAX_MESSAGE_SIZE)
+                            throw new InvalidOperationException("WebSocket message too large");
 
-                string msg = Encoding.UTF8.GetString(stream.ToArray());
+                    } while (!result.EndOfMessage);
 
-                // extract message ID from JSON and add to pending requests
-                string? msgId = ExtractMessageID(msg);
+                    string msg = Encoding.UTF8.GetString(stream.ToArray());
 
-                if (msgId != null && pendingRequests.TryRemove(msgId, out var tcs))
-                {
-                    tcs.TrySetResult(msg);
+                    // extract message ID from JSON and add to pending requests
+                    string? msgId = ExtractMessageID(msg);
+
+                    if (msgId != null && pendingRequests.TryRemove(msgId, out var tcs))
+                    {
+                        tcs.TrySetResult(msg);
+                    }
+                    else
+                    {
+                        Console.WriteLine("Received untracked message: " + msg);
+                    }
                 }
-                else
+                catch (OperationCanceledException)
                 {
-                    Console.WriteLine("Received untracked message: " + msg);
+                    // normal shutdown
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    // exception, keep task running
+                    // so we can attempt reconnect later on 
+                    Console.WriteLine("Receive error: " + ex.Message);
+
+                    DisposeReceiveSocket();
                 }
 
                 await Task.Delay(1, token);
@@ -447,7 +488,7 @@ namespace CalibrationEnv
 
             if (!pendingRequests.TryAdd(msg.MessageID, tcs))
                 throw new InvalidOperationException("Duplicate message id");
-            
+
             byte[] bytes = GetMsgAsByteArray(msg, type);
 
             var socket = GetReceiveSocketOrThrow();
@@ -524,7 +565,7 @@ namespace CalibrationEnv
             {
                 // check for error msg
                 var errorToken = slotNode.TryGetProperty("errorInfo", out var errorProp) ? errorProp.GetString() : null;
-                if(errorToken == null)
+                if (errorToken == null)
                 {
                     Console.WriteLine("Bad GetSlot response, can't determine requested id or data. Node: " + slotNode.ToString());
                     return;
