@@ -22,8 +22,8 @@ namespace CalibrationEnv
         // generated on connect and used to identify client 
         public string Id { get; protected set; }      
 
-        // default send rate of ~60fps, can be overridden by subclasses
-        protected virtual int SendIntervalMs => 16; 
+        // default send rate of ~60fps, can be set in constructor
+        protected readonly int sendIntervalMs = 16; 
 
         // state of send socket
         protected abstract bool IsSendReady { get; }
@@ -32,10 +32,11 @@ namespace CalibrationEnv
         /// Constructor for Adaptor
         /// </summary>
         /// <param name="worldModel">The world model to be used by the adaptor.</param>
-        public Adaptor(WorldModel worldModel)
+        public Adaptor(WorldModel worldModel, int sendIntervalMs)
         {
             this.worldModel = worldModel;
-            this.Id = "";
+            
+            Id = "";
         }
 
         /// <summary>
@@ -80,7 +81,7 @@ namespace CalibrationEnv
                 }
 
                 // wait remaining time in interval, accounting for time spent processing
-                await DelayRemainingAsync(start, SendIntervalMs, token);
+                await DelayRemainingAsync(start, sendIntervalMs, token);
             }
         }
 

@@ -1,6 +1,5 @@
 ﻿using Fleck;
 using System.Diagnostics.CodeAnalysis;
-using System.Net.WebSockets;
 using System.Numerics;
 using System.Text.Json;
 
@@ -14,7 +13,7 @@ namespace CalibrationEnv
         [MemberNotNullWhen(true, nameof(socket))]
         protected override bool IsSendReady => socket != null && socket.IsAvailable;
 
-        public ClientAdaptor(WorldModel worldModel, IWebSocketConnection? socket, string type) : base(worldModel)
+        public ClientAdaptor(WorldModel worldModel, IWebSocketConnection? socket, string type, int sendIntervalMs) : base(worldModel, sendIntervalMs)
         {
             this.socket = socket;
 

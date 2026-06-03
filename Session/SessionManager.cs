@@ -61,74 +61,16 @@ namespace CalibrationEnv
                 var id = socket.ConnectionInfo.Id;
 
                 // on connection open, connect client
-                socket.OnOpen = () =>
-                {
-                    actionQueue.Enqueue(async() =>
-                    {
-                        HandleConnect(socket);
-                    });
-                };
+                socket.OnOpen = () => 
+                    { actionQueue.Enqueue(async() => HandleConnect(socket)); };
 
                 // on connection close, disconnect client
-                socket.OnClose = () =>
-                {
-                    actionQueue.Enqueue(async () =>
-                    {
-                        HandleDisconnect(socket);
-                    });
-                };
+                socket.OnClose = () => 
+                    { actionQueue.Enqueue(async () => HandleDisconnect(socket)); };
 
                 // on msg received, process msg 
-                socket.OnMessage = msg =>
-                {
-                    actionQueue.Enqueue(async () =>
-                    {
-                        // check properly connected client
-                        if (!clients.ContainsKey(id))
-                        {
-                            Console.WriteLine($"Msg from {id} not processed - client not properly opened yet");
-                            return;
-                        }
-
-                        // interpret msg as json
-                        using var doc = JsonDocument.Parse(msg);
-                        var root = doc.RootElement;
-
-                        // check msgType and process accordingly
-                        if (!root.TryGetProperty("msgType", out var msgType))
-                        {
-                            Console.WriteLine($"Msg from {id} invalid - does not contain 'msgType'. \nMessage: {root.ToString()}");
-                            return;
-                        }
-                        if (!Enum.IsDefined(typeof(MessageType), msgType.GetInt32()))
-                        {
-                            Console.WriteLine($"Msg from {id} invalid - unknown message type {msgType.GetInt32()}");
-                            return;
-                        }
-
-                        var type = (MessageType)msgType.GetInt32();
-                        switch (type)
-                        {
-                            // for connect msg, create adaptor and start it 
-                            case MessageType.Connect:
-                                var adaptor = ProcessConnectMsg(socket, root);
-                                if (adaptor != null)
-                                    await adaptor.StartAsync(token);
-                                break;
-
-                            // for data msgs (from resonite and clients), process msg and forward to adaptor to handle
-                            case MessageType.ResoniteData:
-                            case MessageType.ClientData:
-                                ProcessMsg(socket, root);
-                                break;
-
-                            // for all other, unrecognized msg types, log and ignore
-                            default:
-                                Console.WriteLine($"Msg from {id} invalid - unrecognized msgType {msgType}");
-                                break;
-                        }
-                    });
-                };
+                socket.OnMessage = msg => 
+                    { actionQueue.Enqueue(async () => await HandleMessage(socket, msg, token)); };
             });
 
             Console.WriteLine($"WebSocket server started on ws://0.0.0.0:{clientPort}");
@@ -159,6 +101,92 @@ namespace CalibrationEnv
             }
         }
 
+        private void HandleConnect(IWebSocketConnection socket)
+        {
+            var id = socket.ConnectionInfo.Id;
+
+            // attempt to add client to clients 
+            if (clients.TryAdd(id, socket))
+            {
+                Console.WriteLine($"Client {id} connected");
+            }
+            else
+            {
+                Console.WriteLine($"Client {id} couldn't connect");
+            }
+        }
+
+        private void HandleDisconnect(IWebSocketConnection socket)
+        {
+            var id = socket.ConnectionInfo.Id;
+
+            // remove clients 
+            clients.TryRemove(id, out _);
+
+            // try to remove matching adaptor, and if found,
+            // remove all data related to client from world model
+            if (adaptors.TryRemove(id, out var adaptor))
+            {
+                worldModel.RemoveAllFor(adaptor.Id);
+                Console.WriteLine($"Client {id} disconnected");
+            }
+            else
+            {
+                Console.WriteLine($"Client {id} disconnected. But data not properly removed, didn't find adaptor");
+            }
+        }
+
+        private async Task HandleMessage(IWebSocketConnection socket, string msg, CancellationToken token)
+        {
+            var id = socket.ConnectionInfo.Id;
+
+            // check properly connected client
+            if (!clients.ContainsKey(id))
+            {
+                Console.WriteLine($"Msg from {id} not processed - client not properly opened yet");
+                return;
+            }
+
+            // interpret msg as json
+            using var doc = JsonDocument.Parse(msg);
+            var root = doc.RootElement;
+
+            // check msgType and process accordingly
+            if (!root.TryGetProperty("msgType", out var msgType))
+            {
+                Console.WriteLine($"Msg from {id} invalid - does not contain 'msgType'. \nMessage: {root.ToString()}");
+                return;
+            }
+            if (!Enum.IsDefined(typeof(MessageType), msgType.GetInt32()))
+            {
+                Console.WriteLine($"Msg from {id} invalid - unknown message type {msgType.GetInt32()}");
+                return;
+            }
+
+            var type = (MessageType)msgType.GetInt32();
+            switch (type)
+            {
+                // for connect msg, create adaptor and start it 
+                case MessageType.Connect:
+                    var adaptor = ProcessConnectMsg(socket, root);
+                    if (adaptor != null)
+                        await adaptor.StartAsync(token);
+                    break;
+
+                // for data msgs (from resonite and clients), process msg and forward to adaptor to handle
+                case MessageType.ResoniteData:
+                case MessageType.ClientData:
+                    ProcessMsg(socket, root);
+                    break;
+
+                // for all other, unrecognized msg types, log and ignore
+                default:
+                    Console.WriteLine($"Msg from {id} invalid - unrecognized msgType {msgType}");
+                    break;
+            }
+        }
+
+
         /// <summary>
         /// Processes a connect message from a client, creating an adapator for the client.
         /// </summary>
@@ -181,14 +209,21 @@ namespace CalibrationEnv
                 return null;
             }
 
+            // check for provided interval ms setting
+            msgRoot.TryGetProperty("sendRate", out var sendIntervalProp);
+            if (!sendIntervalProp.TryGetInt32(out var sendInterval))
+            {
+                sendInterval = 33; // default to ~30 fps
+            }
+
             // create adaptor
             ClientAdaptor? adaptor = null;
             switch (clientTypeStr)
             {
                 case "unity":
                 case "unreal":
-					adaptor = new ClientAdaptor(worldModel, socket, clientTypeStr);
-					break;
+                    adaptor = new ClientAdaptor(worldModel, socket, clientTypeStr, sendInterval);
+                    break;
                 default:
                     Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} not succesfully processed - clientType {clientTypeStr} isn't supported");
                     break;
@@ -238,41 +273,6 @@ namespace CalibrationEnv
 
             // return success
             return true;
-        }
-
-        private void HandleConnect(IWebSocketConnection socket)
-        {
-            var id = socket.ConnectionInfo.Id;
-
-            // attempt to add client to clients 
-            if (clients.TryAdd(id, socket))
-            {
-                Console.WriteLine($"Client {id} connected");
-            }
-            else
-            {
-                Console.WriteLine($"Client {id} couldn't connect");
-            }
-        }
-
-        private void HandleDisconnect(IWebSocketConnection socket)
-        {
-            var id = socket.ConnectionInfo.Id;
-
-            // remove clients 
-            clients.TryRemove(id, out _);
-
-            // try to remove matching adaptor, and if found,
-            // remove all data related to client from world model
-            if (adaptors.TryRemove(id, out var adaptor))
-            {
-                worldModel.RemoveAllFor(adaptor.Id);
-                Console.WriteLine($"Client {id} disconnected");
-            }
-            else
-            {
-                Console.WriteLine($"Client {id} disconnected. But data not properly removed, didn't find adaptor");
-            }
         }
     }
 }

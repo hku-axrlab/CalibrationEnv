@@ -11,7 +11,7 @@ using System.Text.RegularExpressions;
 
 namespace CalibrationEnv
 {
-    internal class ResoniteAdaptor(WorldModel worldModel) : Adaptor(worldModel)
+    internal class ResoniteAdaptor(WorldModel worldModel) : Adaptor(worldModel, 33) // NOTE: send rate for ResoniteAdaptor fixed in build
     {
         // receive - used for ResoniteLink connection to receive data from Resonite world
         private ClientWebSocket? receiveSocket;
@@ -29,7 +29,7 @@ namespace CalibrationEnv
 
         // interval times for requesting slots from Resonite world, in ms
         protected readonly int RequestRootIntervalMs = 1000;
-        protected readonly int RequestChildIntervalMs = 16;
+        protected readonly int RequestChildIntervalMs = 33;
 
         private const int MAX_MESSAGE_SIZE = 1024 * 1024; // 1 MB
         private const int BUFFER_SIZE = 8192;
