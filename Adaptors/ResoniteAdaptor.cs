@@ -78,7 +78,7 @@ namespace CalibrationEnv
                 // prompt for port to ResoniteLink world
                 Console.Write("Enter port number ResoniteLink world: ");
                 var input = Console.ReadLine();
-                if (!uint.TryParse(input, out inputPort))
+                if (!uint.TryParse(input, out inputPort) || inputPort > 65535)
                 {
                     Console.WriteLine("Invalid port number.\n");
                     continue;

@@ -151,7 +151,7 @@ namespace CalibrationEnv
 				? typeStr[..3].ToUpper()
 				: typeStr.ToUpper().PadRight(3, 'X');
 
-            Console.WriteLine($"Generated GUID: {prefix}-{new string(result)}");
+            Console.WriteLine($"Generated ID: {prefix}-{new string(result)}");
 
 			return $"{prefix}-{new string(result)}";
 		}

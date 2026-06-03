@@ -1,14 +1,12 @@
 ﻿using Fleck;
 using System.Collections.Concurrent;
+using System.Net;
 using System.Text.Json;
 
 namespace CalibrationEnv
 {
     internal class SessionManager
     {
-        // port to clients, e.g. Unity, Unreal, ...
-        private readonly int clientPort = 4196;
-
         // adaptor handling communication with Resonite world
         private readonly ResoniteAdaptor? resoniteAdaptor;
 
@@ -52,28 +50,59 @@ namespace CalibrationEnv
                 await resoniteAdaptor.StartAsync(token);
             }
 
+            // prompt for client connection info 
+            IPAddress clientIPAddress = default;
+            while (!token.IsCancellationRequested)
+            {
+                Console.Write("Enter IP address for client: ");
+                var input = Console.ReadLine();
+
+                if (IPAddress.TryParse(input, out var parsedIp))
+                {
+                    clientIPAddress = parsedIp;
+                    break;
+                }
+
+                Console.WriteLine("Invalid IP address.\n");
+            }
+
+            uint clientPort = 0;
+            while (!token.IsCancellationRequested)
+            {
+                Console.Write("Enter port number for client connections: ");
+                var input = Console.ReadLine();
+
+                if (uint.TryParse(input, out var parsedPort) && parsedPort <= 65535)
+                {
+                    clientPort = parsedPort;
+                    break;
+                }
+
+                Console.WriteLine("Invalid port number.\n");
+            }
+
             // start fleck websocket server to clients
             // clients will subscribe first via port, then send connect msg with client type,
             // after subscribing, they will send/receive world update messages
-            var server = new WebSocketServer($"ws://0.0.0.0:{clientPort}");
+            var server = new WebSocketServer($"ws://{clientIPAddress}:{clientPort}");
             server.Start(socket =>
             {
                 var id = socket.ConnectionInfo.Id;
 
                 // on connection open, connect client
-                socket.OnOpen = () => 
-                    { actionQueue.Enqueue(async() => HandleConnect(socket)); };
+                socket.OnOpen = () =>
+                    { actionQueue.Enqueue(async () => HandleConnect(socket)); };
 
                 // on connection close, disconnect client
-                socket.OnClose = () => 
+                socket.OnClose = () =>
                     { actionQueue.Enqueue(async () => HandleDisconnect(socket)); };
 
                 // on msg received, process msg 
-                socket.OnMessage = msg => 
+                socket.OnMessage = msg =>
                     { actionQueue.Enqueue(async () => await HandleMessage(socket, msg, token)); };
             });
 
-            Console.WriteLine($"WebSocket server started on ws://0.0.0.0:{clientPort}");
+            Console.WriteLine($"WebSocket server started on ws://{clientIPAddress}:{clientPort}");
 
             // process actions from queue while running
             while (!token.IsCancellationRequested)
