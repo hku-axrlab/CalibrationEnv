@@ -252,6 +252,7 @@ namespace CalibrationEnv
                 case "unity":
                 case "unreal":
                 case "python":
+                case "godot":
                     adaptor = new ClientAdaptor(worldModel, socket, clientTypeStr, sendInterval);
                     break;
                 default:
