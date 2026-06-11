@@ -241,7 +241,7 @@ namespace CalibrationEnv
             }
 
             // send msg per user per bone to resonite to update users
-            // Optimized sending per user, incl. a 1ms delay after each send
+            // Optimized sending per user, incl. a 2ms delay after each send
             foreach (var user in update.users)
             {
                 List<string> messages = new List<string>();
@@ -274,7 +274,7 @@ namespace CalibrationEnv
 				finally
 				{
 					sendSocketLock.Release();
-                    await Task.Delay(1);
+                    await Task.Delay(2);
 				}
 			}
         }
@@ -361,7 +361,7 @@ namespace CalibrationEnv
                     DisposeReceiveSocket();
                 }
 
-                await Task.Delay(2, token);
+                await Task.Delay(1, token);
             }
         }
 
