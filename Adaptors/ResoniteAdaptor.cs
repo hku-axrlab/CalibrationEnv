@@ -52,6 +52,8 @@ namespace CalibrationEnv
             // setup connections to resonite
             await ConnectToResonite(token);
 
+            this.sendIntervalMs = 33;
+
             // call base (should return instantly)
             await base.StartAsync(token);
 
@@ -239,9 +241,10 @@ namespace CalibrationEnv
             }
 
             // send msg per user per bone to resonite to update users
-            // TODO: optimize by batching user data?
+            // Optimized sending per user, incl. a 1ms delay after each send
             foreach (var user in update.users)
             {
+                List<string> messages = new List<string>();
                 for (int i = 0; i < user.boneNames.Length; i++)
                 {
                     var position = user.boneTransforms[i].position;
@@ -257,18 +260,23 @@ namespace CalibrationEnv
                         position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z, rotation.W
                     );
 
-                    var socket = GetSendSocketOrThrow();
-                    await sendSocketLock.WaitAsync(token);
-                    try
-                    {
-                        await socket.SendAsync(Encoding.UTF8.GetBytes(msg), WebSocketMessageType.Text, true, token);
-                    }
-                    finally
-                    {
-                        sendSocketLock.Release();
-                    }
-                }
-            }
+                    messages.Add(msg);
+				}
+
+                var totalMsg = string.Join('|', messages.ToArray());
+                
+				var socket = GetSendSocketOrThrow();
+				await sendSocketLock.WaitAsync(token);
+				try
+				{
+					await socket.SendAsync(Encoding.UTF8.GetBytes(totalMsg), WebSocketMessageType.Text, true, token);
+				}
+				finally
+				{
+					sendSocketLock.Release();
+                    await Task.Delay(1);
+				}
+			}
         }
 
         public override void Receive(JsonElement msgRoot)
@@ -353,7 +361,7 @@ namespace CalibrationEnv
                     DisposeReceiveSocket();
                 }
 
-                await Task.Delay(1, token);
+                await Task.Delay(2, token);
             }
         }
 
