@@ -112,12 +112,14 @@ namespace CalibrationEnv
 		public string name;
         public string[] boneNames;
 		public Transform[] boneTransforms;
+        public DataContainer[]? data;
 
-		public void ApplyFrom(UserData other)
+        public void ApplyFrom(UserData other)
 		{
             name = other.name;
             boneNames = other.boneNames;
             boneTransforms = other.boneTransforms;
-		}
+            data = other.data;
+        }
 	}
 }

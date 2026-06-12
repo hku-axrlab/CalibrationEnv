@@ -237,7 +237,12 @@ namespace CalibrationEnv
             foreach (var obj in update.objects)
             {
                 if (obj.tag == "vRoot")
-                    remoteRoots.Add(obj.home, obj);
+                {
+                    if (remoteRoots.ContainsKey(obj.home))
+                        remoteRoots[obj.home] = obj;
+                    else
+                        remoteRoots.Add(obj.home, obj);
+                }
             }
 
             // send msg per user per bone to resonite to update users
@@ -634,7 +639,8 @@ namespace CalibrationEnv
             if ( nameToken.StartsWith("User") && tagValue == "Untagged")
             {
                 // Parse as a user!
-                ParseUser(ref worldUpdate);
+                bool pRootRelative = dataElement.GetProperty("parent").GetProperty("targetId").ToString() != "Root";
+                ParseUser(ref worldUpdate, pRootRelative);
                 return;
             }
             if (id != "Root" && (id == null || string.IsNullOrEmpty(tagValue))) return;
@@ -680,7 +686,7 @@ namespace CalibrationEnv
                 worldUpdate.objects.Add(worldObject);
             }
 
-            void ParseUser( ref WorldUpdate worldUpdate)
+            void ParseUser( ref WorldUpdate worldUpdate, bool pRootRelative = false )
             {
                 // Get Head, Left Hand & Right Hand
                 UserData user = new();
@@ -689,6 +695,8 @@ namespace CalibrationEnv
                 user.home = Id;
                 user.boneTransforms = new Transform[3];
                 user.boneNames = new string[3];
+                user.data = new DataContainer[1];
+                user.data[0] = new DataContainer("bool", "pRootRelative", pRootRelative ? JsonElement.Parse("true") : JsonElement.Parse("false"));
 
                 Transform root = ReadTransformFromSlot(dataElement);
 
