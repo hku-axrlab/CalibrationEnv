@@ -255,6 +255,9 @@ namespace CalibrationEnv
                 case "godot":
                     adaptor = new ClientAdaptor(worldModel, socket, clientTypeStr, sendInterval);
                     break;
+                case "usd":
+                    adaptor = new USDAdaptor(worldModel, socket, clientTypeStr, sendInterval);
+                    break;
                 default:
                     Console.WriteLine($"Connect msg from {socket.ConnectionInfo.Id} not succesfully processed - clientType {clientTypeStr} isn't supported");
                     break;
