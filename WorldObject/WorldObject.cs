@@ -80,7 +80,7 @@ namespace CalibrationEnv
 
         public void MakeRelative( ref Vector3 position )
         {
-            position = RotateVector(position - this.position, rotation);
+            position = Vector3.Transform((position - this.position), Quaternion.Inverse(rotation));
         }
 
         public void MakeRelative( ref Quaternion rotation )

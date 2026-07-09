@@ -51,7 +51,7 @@ namespace CalibrationEnv
                 {
                     ParseObject(objectJson, ref update);
                 }
-            }            
+            }
 
             // and apply update to world model
             worldModel.ApplyUpdate(WorldUpdateSource.Client, update);

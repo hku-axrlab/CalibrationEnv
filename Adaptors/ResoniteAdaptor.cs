@@ -47,6 +47,9 @@ namespace CalibrationEnv
         // NOTE: byte value always 0, just wanted ConcurrentDic pattern
         private readonly ConcurrentDictionary<string, byte> registeredSlots = [];
 
+        // Hacks
+        Transform vRootTransform = new Transform(), pRootTransform = new Transform();
+
         public override async Task StartAsync(CancellationToken token)
         {
             // setup connections to resonite
@@ -260,6 +263,11 @@ namespace CalibrationEnv
                         remoteRoots[user.home].transform.MakeRelative(ref position);
                         remoteRoots[user.home].transform.MakeRelative(ref rotation);
                     }
+
+                    // Hack to compensate for users being vRoot Relatiive, and not pRootRelative
+                    // TODO: Implement pRootRelative-ness for all clients
+
+                    position -= (vRootTransform.position - pRootTransform.position);
 
                     var msg = string.Join(';', user.name, user.id, user.boneNames[i],
                         position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z, rotation.W
@@ -684,6 +692,17 @@ namespace CalibrationEnv
                 worldObject.transform = transform;
                 worldObject.data = [.. data];
                 worldUpdate.objects.Add(worldObject);
+
+                if (tagValue == "pRoot")
+                {
+                    // Store value for later use
+                    pRootTransform = worldObject.transform;
+                }
+                if (tagValue == "vRoot")
+                {
+                    // Store value for later use
+                    vRootTransform = worldObject.transform;
+                }
             }
 
             void ParseUser( ref WorldUpdate worldUpdate, bool pRootRelative = false )
@@ -707,17 +726,20 @@ namespace CalibrationEnv
                     {
                         case "Head":
                             user.boneTransforms[0] = ReadTransformFromSlot(child);
-                            user.boneTransforms[0].position += root.position;
+                            user.boneTransforms[0].position = Vector3.Transform(user.boneTransforms[0].position, root.rotation) + root.position;
+                            user.boneTransforms[0].rotation *= root.rotation;
                             user.boneNames[0] = "Head";
                             break;
                         case "Left Hand":
                             user.boneTransforms[1] = ReadTransformFromSlot(child);
-                            user.boneTransforms[1].position += root.position;
+                            user.boneTransforms[1].position = Vector3.Transform(user.boneTransforms[1].position, root.rotation) + root.position;
+                            user.boneTransforms[1].rotation *= root.rotation;
                             user.boneNames[1] = "LHand";
                             break;
                         case "Right Hand":
                             user.boneTransforms[2] = ReadTransformFromSlot(child);
-                            user.boneTransforms[2].position += root.position;
+                            user.boneTransforms[2].position = Vector3.Transform(user.boneTransforms[2].position, root.rotation) + root.position;
+                            user.boneTransforms[2].rotation *= root.rotation;
                             user.boneNames[2] = "RHand";
                             break;
                     }
