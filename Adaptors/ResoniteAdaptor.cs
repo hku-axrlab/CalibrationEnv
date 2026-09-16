@@ -265,9 +265,15 @@ namespace CalibrationEnv
                     }
 
                     // Hack to compensate for users being vRoot Relatiive, and not pRootRelative
-                    // TODO: Implement pRootRelative-ness for all clients
+                    // TODO: Implement pRootRelative-ness for all clients?
 
-                    position -= (vRootTransform.position - pRootTransform.position);
+                    // FIXME: The Offset's y-position is reverse from what it needs to be...
+                    //  -> Why does this not affect X/Z in the same way?
+
+                    // TODO: This calculation does NOT account for the space of the information, so some clients (e.g. Unreal) will need to pre-transform this before sending
+                    Vector3 offset = (vRootTransform.position - pRootTransform.position);
+                    offset.Y *= -1;
+                    position -= offset;
 
                     var msg = string.Join(';', user.name, user.id, user.boneNames[i],
                         position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z, rotation.W
