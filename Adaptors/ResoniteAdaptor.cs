@@ -271,9 +271,9 @@ namespace CalibrationEnv
                     //  -> Why does this not affect X/Z in the same way?
 
                     // TODO: This calculation does NOT account for the space of the information, so some clients (e.g. Unreal) will need to pre-transform this before sending
-                    Vector3 offset = (vRootTransform.position - pRootTransform.position);
-                    offset.Y *= -1;
-                    position -= offset;
+                    //Vector3 offset = (vRootTransform.position - pRootTransform.position);
+                    //offset.Y *= -1;
+                    //position -= offset;
 
                     var msg = string.Join(';', user.name, user.id, user.boneNames[i],
                         position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z, rotation.W
