@@ -34,8 +34,8 @@ namespace CalibrationEnv
         protected readonly int RequestRootIntervalMs = 1000;
         protected readonly int RequestChildIntervalMs = 33;
 
-        private const int MAX_MESSAGE_SIZE = 1024 * 1024; // 1 MB
-        private const int BUFFER_SIZE = 8192;
+        private const int MAX_MESSAGE_SIZE = 1024 * 1024 * 2; // 2 MB
+        private const int BUFFER_SIZE = 8192 * 2;
 
         // pending requests collection,
         // to match responses with requests using message ID
@@ -715,7 +715,9 @@ namespace CalibrationEnv
             {
                 // Get Head, Left Hand & Right Hand
                 UserData user = new();
-                user.id = id;
+                string name = nameToken.ToString();
+                name = name.Split('>')[1].Split(' ')[0];
+                user.id = name;
                 user.name = nameToken;
                 user.home = Id;
                 user.boneTransforms = new Transform[3];
