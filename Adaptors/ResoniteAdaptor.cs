@@ -762,23 +762,23 @@ namespace CalibrationEnv
                     {
                         string shortName = nameString.Substring(0, 6);
                         WorldObject tracker = new();
-                        worldObject.id = ReadIDFromSlot(child); // TODO: Test!
-                        worldObject.tag = shortName;    // Maybe let the user change this?
-                        worldObject.name = "tracker-" + shortName;
-                        worldObject.home = Id;
+                        tracker.id = ReadIDFromSlot(child); // TODO: Test!
+                        tracker.tag = shortName;    // Maybe let the user change this?
+                        tracker.name = "tracker-" + shortName;
+                        tracker.home = Id;
 
                         // Get local position
-                        worldObject.transform = ReadTransformFromSlot(child);
+                        tracker.transform = ReadTransformFromSlot(child);
 
                         // Calculate absolute position
-                        worldObject.transform.position = Vector3.Transform(worldObject.transform.position, root.rotation) + root.position;
-                        worldObject.transform.rotation *= root.rotation;
+                        tracker.transform.position = Vector3.Transform(tracker.transform.position, root.rotation) + root.position;
+                        tracker.transform.rotation *= root.rotation;
 
                         // Inject empty data (do we need any data on this object?)
-                        worldObject.data = [.. new DataContainer[0]];
+                        tracker.data = [.. new DataContainer[0]];
 
                         // Add to WorldUpdate
-                        worldUpdate.objects.Add(worldObject);
+                        worldUpdate.objects.Add(tracker);
                     }
                 }
 
@@ -788,8 +788,7 @@ namespace CalibrationEnv
 
         private string ReadIDFromSlot(JsonElement slot)
         {
-            var dataElement = slot.GetProperty("data");
-            return dataElement.GetProperty("id").ToString();
+            return slot.GetProperty("id").ToString();
         }
 
         private Transform ReadTransformFromSlot( JsonElement slot )
