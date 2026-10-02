@@ -730,7 +730,8 @@ namespace CalibrationEnv
                 var children = dataElement.GetProperty("children").EnumerateArray();
                 foreach( var child in children )
                 {
-                    switch(child.GetProperty("name").GetProperty("value").ToString())
+                    string nameString = child.GetProperty("name").GetProperty("value").ToString();
+                    switch (nameString)
                     {
                         case "Head":
                             user.boneTransforms[0] = ReadTransformFromSlot(child);
@@ -751,10 +752,44 @@ namespace CalibrationEnv
                             user.boneNames[2] = "RHand";
                             break;
                     }
+                    // TODO: Recognize Vive Trackers by name (64-char string containing no dots or spaces)
+                    //          Then inject them as "tracker..." with SN as tag (so we can map unique objects to them)
+                    // QUESTION: Do we need to track them? Maybe not, as the world update should be consistent?
+                    //              I'm guessing the rename before worldUpdate.Add will be stable (and thus recognize them on the other side)
+
+                    // TODO: Figure out if this name is always the same (I sure hope so, but ... maybe not?)
+                    if (nameString.Length == 64) // interpret this as a Vive Tracker
+                    {
+                        string shortName = nameString.Substring(0, 6);
+                        WorldObject tracker = new();
+                        worldObject.id = ReadIDFromSlot(child); // TODO: Test!
+                        worldObject.tag = shortName;    // Maybe let the user change this?
+                        worldObject.name = "tracker-" + shortName;
+                        worldObject.home = Id;
+
+                        // Get local position
+                        worldObject.transform = ReadTransformFromSlot(child);
+
+                        // Calculate absolute position
+                        worldObject.transform.position = Vector3.Transform(worldObject.transform.position, root.rotation) + root.position;
+                        worldObject.transform.rotation *= root.rotation;
+
+                        // Inject empty data (do we need any data on this object?)
+                        worldObject.data = [.. new DataContainer[0]];
+
+                        // Add to WorldUpdate
+                        worldUpdate.objects.Add(worldObject);
+                    }
                 }
 
                 worldUpdate.users.Add(user);
             }
+        }
+
+        private string ReadIDFromSlot(JsonElement slot)
+        {
+            var dataElement = slot.GetProperty("data");
+            return dataElement.GetProperty("id").ToString();
         }
 
         private Transform ReadTransformFromSlot( JsonElement slot )
