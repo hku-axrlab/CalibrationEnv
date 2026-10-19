@@ -650,7 +650,7 @@ namespace CalibrationEnv
 
             // Skip if no id and/or tag
             var tagValue = tagToken?.GetString() ?? "Untagged";
-            if ( nameToken.StartsWith("User") && tagValue == "Untagged")
+            if (nameToken.StartsWith("User") && tagValue == "Untagged")
             {
                 // Parse as a user!
                 bool pRootRelative = dataElement.GetProperty("parent").GetProperty("targetId").ToString() != "Root";
@@ -735,20 +735,23 @@ namespace CalibrationEnv
                     {
                         case "Head":
                             user.boneTransforms[0] = ReadTransformFromSlot(child);
-                            user.boneTransforms[0].position = Vector3.Transform(user.boneTransforms[0].position, root.rotation) + root.position;
+                            user.boneTransforms[0].position = Vector3.Transform(user.boneTransforms[0].position, root.rotation) * root.scale + root.position;
                             user.boneTransforms[0].rotation *= root.rotation;
+                            user.boneTransforms[0].scale *= root.scale;
                             user.boneNames[0] = "Head";
                             break;
                         case "Left Hand":
                             user.boneTransforms[1] = ReadTransformFromSlot(child);
-                            user.boneTransforms[1].position = Vector3.Transform(user.boneTransforms[1].position, root.rotation) + root.position;
+                            user.boneTransforms[1].position = Vector3.Transform(user.boneTransforms[1].position, root.rotation) * root.scale + root.position;
                             user.boneTransforms[1].rotation *= root.rotation;
+                            user.boneTransforms[1].scale *= root.scale;
                             user.boneNames[1] = "LHand";
                             break;
                         case "Right Hand":
                             user.boneTransforms[2] = ReadTransformFromSlot(child);
-                            user.boneTransforms[2].position = Vector3.Transform(user.boneTransforms[2].position, root.rotation) + root.position;
+                            user.boneTransforms[2].position = Vector3.Transform(user.boneTransforms[2].position, root.rotation) * root.scale + root.position;
                             user.boneTransforms[2].rotation *= root.rotation;
+                            user.boneTransforms[2].scale *= root.scale;
                             user.boneNames[2] = "RHand";
                             break;
                     }
