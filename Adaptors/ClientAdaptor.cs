@@ -1,5 +1,6 @@
 ﻿using Fleck;
 using System.Diagnostics.CodeAnalysis;
+using System.Linq.Expressions;
 using System.Numerics;
 using System.Text.Json;
 
@@ -115,7 +116,7 @@ namespace CalibrationEnv
             List<DataContainer> dataList = new();
             if (userNode.TryGetProperty("variables", out var dataElements))
             {
-                if (dataElements.GetArrayLength() > 0 )
+                if (dataElements.ValueKind == JsonValueKind.Array && dataElements.GetArrayLength() > 0)
                 {
                     dataList = new(dataElements.GetArrayLength());
                     foreach (JsonElement variable in dataElements.EnumerateArray())
