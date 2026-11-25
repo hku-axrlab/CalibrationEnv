@@ -15,7 +15,11 @@ namespace CalibrationEnv
     internal class ResoniteTemplateObject
     {
         public string tag = "";
+        public string name = "";
         public string slotJsonString = "";
+
+        // Key / Value: variableName / componentId
+        public Dictionary<string, string> variableMap = new Dictionary<string, string>();
 
         public ResoniteTemplateObject(string tag, string slotJsonString)
         {
@@ -27,7 +31,13 @@ namespace CalibrationEnv
     internal class ResoniteSpawnedObject
     {
         public string worldModelId = "";
-        public string resoniteSlotId = "";
+        public string resoniteId = "";
+
+        public ResoniteSpawnedObject(string worldModelId, string resoniteId)
+        {
+            this.worldModelId = worldModelId;
+            this.resoniteId = resoniteId;
+        }
     }
 
     internal class ResoniteAdaptor(WorldModel worldModel) : Adaptor(worldModel, 33) // NOTE: send rate for ResoniteAdaptor fixed in build
@@ -277,11 +287,13 @@ namespace CalibrationEnv
                             // already spawned, updateSlot (transform & variables)
                             // TODO: store all the ID's of the DynamicValueVariable<> components, so we can access them directly in the updateSlot message!
                             // This should be part of the ResoniteTemplateObject class
+                            
                         }
                         else
                         {
                             // new object, spawn!
                             // TODO: Recreate the object in the Root based on the child json string we received from the Template.
+                            // receiveSocket.SendAsync();
                         }
                     }
                 }
@@ -481,7 +493,7 @@ namespace CalibrationEnv
                             var templateMessage = BuildGetSlotMsg(childID, true, -1);
                             string templateResponse = await SendRequestAsync(templateMessage, "getSlot", token);
 
-                            HandleTemplateResponse(templateResponse);
+                            await HandleTemplateResponse(templateResponse, token);
                         }
                         continue;
                     }
@@ -494,7 +506,7 @@ namespace CalibrationEnv
             }
         }
 
-        private void HandleTemplateResponse(string templateResponse)
+        private async Task HandleTemplateResponse(string templateResponse, CancellationToken token)
         {
             try
             {
@@ -533,6 +545,21 @@ namespace CalibrationEnv
                 // If succesful, store that we've completed this task (so we don't try it again)
                 // If you want it to refresh, make sure you set this to false
                 templatesParsed = true;
+
+                // DEBUG: try to spawn every template object
+                foreach( var template in templateMap )
+                {
+                    WorldObject obj = new WorldObject();
+                    obj.home = "SOMEWHERE";
+                    obj.name = "SomeObject";
+                    obj.tag = "SomeTag";
+                    obj.id = "test-id2";
+                    obj.transform = new Transform(new Vector3(10,20,30), Quaternion.CreateFromYawPitchRoll(15, 25, 35), new Vector3(1, 2, 3));
+                    
+                    string response = await SendRequestAsync(BuildAddSlotMsg(template.Value, obj.id, obj), "addSlot", token);
+
+                    Console.WriteLine("Respone: " + response);
+                }
             }
             catch (Exception e)
             {
@@ -654,6 +681,71 @@ namespace CalibrationEnv
                 IncludeComponentData = includeComponentData,
                 Depth = depth
             };
+        }
+
+        private AddSlot BuildAddSlotMsg(ResoniteTemplateObject template, string id, WorldObject obj, bool removeComponents = true)
+        {
+            // get to core data from msg
+            var jsonRoot = JsonDocument.Parse(template.slotJsonString).RootElement;
+
+            List<Slot> children = GetChildrenFrom(jsonRoot);
+            List<Component> components = GetComponentsFrom(jsonRoot);
+
+            AddSlot msg = new AddSlot
+            {
+                MessageID = System.Guid.NewGuid().ToString(),
+                Data = new Slot()
+                {
+                    ID = System.Guid.NewGuid().ToString(),
+                    Name = new Field_string() { Value = obj.name },
+                    Parent = new Reference() { TargetID = "Root" },
+                    Position = new Field_float3() { Value = new float3 { x = obj.transform.position.X, y = obj.transform.position.Y, z = obj.transform.position.Z } },
+                    Rotation = new Field_floatQ() { Value = new floatQ { x = obj.transform.rotation.X, y = obj.transform.rotation.Y, z = obj.transform.rotation.Z, w = obj.transform.rotation.W } },
+                    Scale = new Field_float3() { Value = new float3 { x = obj.transform.scale.X, y = obj.transform.scale.Y, z = obj.transform.scale.Z } },
+                    Children = children,
+                    Components = components,
+                    IsPersistent = new Field_bool { Value = false }
+                }
+            };
+
+            if ( removeComponents )
+                RemoveComponentsIn(msg.Data);
+
+            return msg;
+        }
+
+        private List<Component> GetComponentsFrom(JsonElement jsonRoot)
+        {
+            List<Component> retVal = new List<Component>();
+
+            // get ID's from all children, 
+            // add to collection if not yet discovered
+            var components = jsonRoot.GetProperty("components");
+
+            retVal = JsonSerializer.Deserialize<List<Component>>(components)!;
+
+            return retVal;
+        }
+
+        private List<Slot> GetChildrenFrom(JsonElement jsonRoot)
+        {
+            List<Slot> retVal = new List<Slot>();
+
+            // get ID's from all children,
+            // add to collection if not yet discovered
+            var children = jsonRoot.GetProperty("children");
+
+            retVal = JsonSerializer.Deserialize<List<Slot>>(children)!;
+
+            return retVal;
+        }
+
+        private void RemoveComponentsIn(Slot slot, bool recursive = true)
+        {
+            slot.Components = null;
+            if (recursive && slot.Children != null)
+                foreach (var child in slot.Children)
+                    RemoveComponentsIn(child, recursive);
         }
 
         private byte[] GetMsgAsByteArray(Message msg, string type)
