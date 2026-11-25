@@ -12,6 +12,24 @@ using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace CalibrationEnv
 {
+    internal class ResoniteTemplateObject
+    {
+        public string tag = "";
+        public string slotJsonString = "";
+
+        public ResoniteTemplateObject(string tag, string slotJsonString)
+        {
+            this.tag = tag;
+            this.slotJsonString = slotJsonString;
+        }
+    }
+
+    internal class ResoniteSpawnedObject
+    {
+        public string worldModelId = "";
+        public string resoniteSlotId = "";
+    }
+
     internal class ResoniteAdaptor(WorldModel worldModel) : Adaptor(worldModel, 33) // NOTE: send rate for ResoniteAdaptor fixed in build
     {
         // receive - used for ResoniteLink connection to receive data from Resonite world
@@ -20,8 +38,11 @@ namespace CalibrationEnv
         [MemberNotNullWhen(true, nameof(receiveSocket))]
         private bool IsReceiveReady => receiveSocket != null && receiveSocket.State == WebSocketState.Open;
         private bool disconnectReceivePrinted = false;
+
         // We use this to track if we've received existing Templates from Resonite or not, set to false to re-trigger this at runtime
         private bool templatesParsed = false;
+        private ConcurrentDictionary<string, ResoniteTemplateObject> templateMap = new ConcurrentDictionary<string, ResoniteTemplateObject>();
+        private ConcurrentDictionary<string, ResoniteSpawnedObject> spawnedTemplates = new ConcurrentDictionary<string, ResoniteSpawnedObject>();
 
         // send - used for Resonite connection to send data to Resonite world
         private readonly int resonitePort = 5001;
@@ -246,6 +267,24 @@ namespace CalibrationEnv
                     else
                         remoteRoots.Add(obj.home, obj);
                 }
+                else
+                {
+                    // FIXME: First implementation of sending data back through resonite link
+                    if ( templateMap.ContainsKey(obj.tag))
+                    {
+                        if ( spawnedTemplates.ContainsKey(obj.id))
+                        {
+                            // already spawned, updateSlot (transform & variables)
+                            // TODO: store all the ID's of the DynamicValueVariable<> components, so we can access them directly in the updateSlot message!
+                            // This should be part of the ResoniteTemplateObject class
+                        }
+                        else
+                        {
+                            // new object, spawn!
+                            // TODO: Recreate the object in the Root based on the child json string we received from the Template.
+                        }
+                    }
+                }
             }
 
             // send msg per user per bone to resonite to update users
@@ -297,19 +336,6 @@ namespace CalibrationEnv
 				}
 			}
 
-            // TODO: send non-resonite Objects too
-            // FIXME: First implementation of sending data back through resonite link
-
-            // The approach will be to send it back using a request to create slots based on existing slots
-            // QUESTIONS:
-            //  1. How can we recognize if a slot exists, and then duplicate it?
-            //  2. How can we set the properties of a specific slot (name, variables, etc.) so they track our remote WorldObject
-            //  3. How can we store this effectively to track that these objects exist on the Resonite side (and then send updateSlot instead)
-
-            // SO:
-            //  A: send a "duplicateSlot" (does this exist?) for everything that isn't tracked
-            //  B: send an "updateSlot" for things that are already tracked
-            //  C: listen for the response to add things that were succesfully created to the tracked list
         }
 
         public override void Receive(JsonElement msgRoot)
@@ -452,8 +478,8 @@ namespace CalibrationEnv
                         {                            
                             // Special case: request all of the children from this object exactly ONCE
                             // get Root slot data 
-                            var templateMessage = BuildGetSlotMsg(childID, false, -1);
-                            string templateResponse = await SendRequestAsync(msg, "getSlot", token);
+                            var templateMessage = BuildGetSlotMsg(childID, true, -1);
+                            string templateResponse = await SendRequestAsync(templateMessage, "getSlot", token);
 
                             HandleTemplateResponse(templateResponse);
                         }
@@ -470,8 +496,48 @@ namespace CalibrationEnv
 
         private void HandleTemplateResponse(string templateResponse)
         {
-            templatesParsed = true;
-            Console.WriteLine(templateResponse);
+            try
+            {
+                // get response as JSONElement 
+                var jsonRoot = JsonDocument.Parse(templateResponse).RootElement;
+
+                // error handling 
+                if (!CheckJSONResponse(jsonRoot, "slotData"))
+                    return;
+
+                // get core data 
+                var data = jsonRoot.GetProperty("data");
+
+                // get ID's from all children, 
+                // add to collection if not yet discovered
+                var children = data.GetProperty("children").EnumerateArray();
+
+                // Wipe our template map before we begin
+                templateMap.Clear();
+
+                foreach (var child in children)
+                {
+                    var childTag = child.GetProperty("tag").GetProperty("value").GetString();
+                    if (!string.IsNullOrEmpty(childTag))
+                    {
+                        // Should never encounter duplicates
+                        if ( templateMap.ContainsKey(childTag))
+                            Console.WriteLine("Warning: duplicate tag in templateMap and Templates received from Resonite: " + childTag);
+                        if (!templateMap.TryAdd(childTag, new ResoniteTemplateObject(childTag, child.ToString())))
+                            Console.WriteLine("Error: failed to add template to map: " + childTag);
+                        else
+                            Console.WriteLine($"Added {childTag} to map: " + child.ToString());
+                    }
+                }
+
+                // If succesful, store that we've completed this task (so we don't try it again)
+                // If you want it to refresh, make sure you set this to false
+                templatesParsed = true;
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("Error reading Template Response Json: " + e.Message);
+            }
         }
 
         private async Task GetChildrenLoop(CancellationToken token)
