@@ -20,6 +20,8 @@ namespace CalibrationEnv
         [MemberNotNullWhen(true, nameof(receiveSocket))]
         private bool IsReceiveReady => receiveSocket != null && receiveSocket.State == WebSocketState.Open;
         private bool disconnectReceivePrinted = false;
+        // We use this to track if we've received existing Templates from Resonite or not, set to false to re-trigger this at runtime
+        private bool templatesParsed = false;
 
         // send - used for Resonite connection to send data to Resonite world
         private readonly int resonitePort = 5001;
@@ -230,8 +232,6 @@ namespace CalibrationEnv
             }
 
             // RN: only send non-resonite users
-            // TODO: send non-resonite Objects too
-
             Dictionary<string, WorldObject> remoteRoots = new Dictionary<string, WorldObject>();
 
             // get update from world
@@ -296,6 +296,20 @@ namespace CalibrationEnv
                     await Task.Delay(2);
 				}
 			}
+
+            // TODO: send non-resonite Objects too
+            // FIXME: First implementation of sending data back through resonite link
+
+            // The approach will be to send it back using a request to create slots based on existing slots
+            // QUESTIONS:
+            //  1. How can we recognize if a slot exists, and then duplicate it?
+            //  2. How can we set the properties of a specific slot (name, variables, etc.) so they track our remote WorldObject
+            //  3. How can we store this effectively to track that these objects exist on the Resonite side (and then send updateSlot instead)
+
+            // SO:
+            //  A: send a "duplicateSlot" (does this exist?) for everything that isn't tracked
+            //  B: send an "updateSlot" for things that are already tracked
+            //  C: listen for the response to add things that were succesfully created to the tracked list
         }
 
         public override void Receive(JsonElement msgRoot)
@@ -424,16 +438,25 @@ namespace CalibrationEnv
                 foreach (var child in children)
                 {
                     // add child id to registered slots
-                    // but only interesseted in tagged childern
+                    // but only interesseted in tagged children
                     var childID = child.GetProperty("id").GetString()!;
                     var childTag = child.GetProperty("tag").GetProperty("value").GetString();
+                    var name = child.GetProperty("name").GetProperty("value").GetString()!;
 
                     if (string.IsNullOrEmpty(childTag) || string.IsNullOrEmpty(childID))
                     {
                         // Check if this is a user or not
-                        var name = child.GetProperty("name").GetProperty("value").GetString()!;
                         if (name.StartsWith("User"))
                             registeredSlots.TryAdd(childID, 1);
+                        else if (name.Equals("Templates") && !templatesParsed)
+                        {                            
+                            // Special case: request all of the children from this object exactly ONCE
+                            // get Root slot data 
+                            var templateMessage = BuildGetSlotMsg(childID, false, -1);
+                            string templateResponse = await SendRequestAsync(msg, "getSlot", token);
+
+                            HandleTemplateResponse(templateResponse);
+                        }
                         continue;
                     }
 
@@ -443,6 +466,12 @@ namespace CalibrationEnv
                 // wait remaining time in interval, accounting for time spent processing
                 await DelayRemainingAsync(start, RequestRootIntervalMs, token);
             }
+        }
+
+        private void HandleTemplateResponse(string templateResponse)
+        {
+            templatesParsed = true;
+            Console.WriteLine(templateResponse);
         }
 
         private async Task GetChildrenLoop(CancellationToken token)
