@@ -1,5 +1,6 @@
 ﻿using Fleck;
 using System.Diagnostics.CodeAnalysis;
+using System.Linq.Expressions;
 using System.Numerics;
 using System.Text.Json;
 
@@ -51,7 +52,7 @@ namespace CalibrationEnv
                 {
                     ParseObject(objectJson, ref update);
                 }
-            }            
+            }
 
             // and apply update to world model
             worldModel.ApplyUpdate(WorldUpdateSource.Client, update);
@@ -111,6 +112,36 @@ namespace CalibrationEnv
                 boneTransforms.Add(new Transform(position, rotation, scale));
             }
 
+            // parse optional extra data 
+            List<DataContainer> dataList = new();
+            if (userNode.TryGetProperty("variables", out var dataElements))
+            {
+                if (dataElements.ValueKind == JsonValueKind.Array && dataElements.GetArrayLength() > 0)
+                {
+                    dataList = new(dataElements.GetArrayLength());
+                    foreach (JsonElement variable in dataElements.EnumerateArray())
+                    {
+                        string? dataName = variable.GetProperty("name").GetString();
+                        string? dataType = variable.GetProperty("type").GetString();
+                        JsonElement dataElement = variable.GetProperty("value");
+
+                        // simple error handling - just skip variables that don't have the required info, should be correct otherwise
+                        if (dataType == null || dataName == null)
+                        {
+                            Console.WriteLine($"Object variable for {name} parsed without name or type - won't be added. Name: [{dataName}], Type: [{dataType}].");
+                            continue;
+                        }
+
+                        DataContainer data = new(dataType, dataName, dataElement.Clone());
+                        dataList.Add(data);
+                    }
+                }
+            }
+            else
+            {
+                dataList = new();
+            }
+
             // very simple error handling - really should just be correct otherwise, fix it!
             if (boneTransforms.Count != boneNames.Count)
             {
@@ -124,6 +155,7 @@ namespace CalibrationEnv
             userData.home = Id;
             userData.boneNames = [.. boneNames];
             userData.boneTransforms = [.. boneTransforms];
+            userData.data = [.. dataList];
 
             // add user to update
             worldUpdate.users.Add(userData);

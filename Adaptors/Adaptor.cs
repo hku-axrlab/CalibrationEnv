@@ -23,7 +23,7 @@ namespace CalibrationEnv
         public string Id { get; protected set; }      
 
         // default send rate of ~60fps, can be set in constructor
-        protected readonly int sendIntervalMs = 16; 
+        protected int sendIntervalMs = 16; 
 
         // state of send socket
         protected abstract bool IsSendReady { get; }

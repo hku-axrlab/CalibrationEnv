@@ -34,8 +34,8 @@ namespace CalibrationEnv
         protected readonly int RequestRootIntervalMs = 1000;
         protected readonly int RequestChildIntervalMs = 33;
 
-        private const int MAX_MESSAGE_SIZE = 1024 * 1024; // 1 MB
-        private const int BUFFER_SIZE = 8192;
+        private const int MAX_MESSAGE_SIZE = 1024 * 1024 * 2; // 2 MB
+        private const int BUFFER_SIZE = 8192 * 2;
 
         // pending requests collection,
         // to match responses with requests using message ID
@@ -47,10 +47,15 @@ namespace CalibrationEnv
         // NOTE: byte value always 0, just wanted ConcurrentDic pattern
         private readonly ConcurrentDictionary<string, byte> registeredSlots = [];
 
+        // Hacks
+        Transform vRootTransform = new Transform(), pRootTransform = new Transform();
+
         public override async Task StartAsync(CancellationToken token)
         {
             // setup connections to resonite
             await ConnectToResonite(token);
+
+            this.sendIntervalMs = 33;
 
             // call base (should return instantly)
             await base.StartAsync(token);
@@ -235,13 +240,19 @@ namespace CalibrationEnv
             foreach (var obj in update.objects)
             {
                 if (obj.tag == "vRoot")
-                    remoteRoots.Add(obj.home, obj);
+                {
+                    if (remoteRoots.ContainsKey(obj.home))
+                        remoteRoots[obj.home] = obj;
+                    else
+                        remoteRoots.Add(obj.home, obj);
+                }
             }
 
             // send msg per user per bone to resonite to update users
-            // TODO: optimize by batching user data?
+            // Optimized sending per user, incl. a 2ms delay after each send
             foreach (var user in update.users)
             {
+                List<string> messages = new List<string>();
                 for (int i = 0; i < user.boneNames.Length; i++)
                 {
                     var position = user.boneTransforms[i].position;
@@ -253,22 +264,38 @@ namespace CalibrationEnv
                         remoteRoots[user.home].transform.MakeRelative(ref rotation);
                     }
 
+                    // Hack to compensate for users being vRoot Relatiive, and not pRootRelative
+                    // TODO: Implement pRootRelative-ness for all clients?
+
+                    // FIXME: The Offset's y-position is reverse from what it needs to be...
+                    //  -> Why does this not affect X/Z in the same way?
+
+                    // TODO: This calculation does NOT account for the space of the information, so some clients (e.g. Unreal) will need to pre-transform this before sending
+                    //Vector3 offset = (vRootTransform.position - pRootTransform.position);
+                    //offset.Y *= -1;
+                    //position -= offset;
+
                     var msg = string.Join(';', user.name, user.id, user.boneNames[i],
                         position.X, position.Y, position.Z, rotation.X, rotation.Y, rotation.Z, rotation.W
                     );
 
-                    var socket = GetSendSocketOrThrow();
-                    await sendSocketLock.WaitAsync(token);
-                    try
-                    {
-                        await socket.SendAsync(Encoding.UTF8.GetBytes(msg), WebSocketMessageType.Text, true, token);
-                    }
-                    finally
-                    {
-                        sendSocketLock.Release();
-                    }
-                }
-            }
+                    messages.Add(msg);
+				}
+
+                var totalMsg = string.Join('|', messages.ToArray());
+                
+				var socket = GetSendSocketOrThrow();
+				await sendSocketLock.WaitAsync(token);
+				try
+				{
+					await socket.SendAsync(Encoding.UTF8.GetBytes(totalMsg), WebSocketMessageType.Text, true, token);
+				}
+				finally
+				{
+					sendSocketLock.Release();
+                    await Task.Delay(2);
+				}
+			}
         }
 
         public override void Receive(JsonElement msgRoot)
@@ -623,10 +650,11 @@ namespace CalibrationEnv
 
             // Skip if no id and/or tag
             var tagValue = tagToken?.GetString() ?? "Untagged";
-            if ( nameToken.StartsWith("User") && tagValue == "Untagged")
+            if (nameToken.StartsWith("User") && tagValue == "Untagged")
             {
                 // Parse as a user!
-                ParseUser(ref worldUpdate);
+                bool pRootRelative = dataElement.GetProperty("parent").GetProperty("targetId").ToString() != "Root";
+                ParseUser(ref worldUpdate, pRootRelative);
                 return;
             }
             if (id != "Root" && (id == null || string.IsNullOrEmpty(tagValue))) return;
@@ -670,45 +698,100 @@ namespace CalibrationEnv
                 worldObject.transform = transform;
                 worldObject.data = [.. data];
                 worldUpdate.objects.Add(worldObject);
+
+                if (tagValue == "pRoot")
+                {
+                    // Store value for later use
+                    pRootTransform = worldObject.transform;
+                }
+                if (tagValue == "vRoot")
+                {
+                    // Store value for later use
+                    vRootTransform = worldObject.transform;
+                }
             }
 
-            void ParseUser( ref WorldUpdate worldUpdate)
+            void ParseUser( ref WorldUpdate worldUpdate, bool pRootRelative = false )
             {
                 // Get Head, Left Hand & Right Hand
                 UserData user = new();
-                user.id = id;
+                string name = nameToken.ToString();
+                name = name.Split('>')[1].Split(' ')[0];
+                user.id = name;
                 user.name = nameToken;
                 user.home = Id;
                 user.boneTransforms = new Transform[3];
                 user.boneNames = new string[3];
+                user.data = new DataContainer[1];
+                user.data[0] = new DataContainer("bool", "pRootRelative", pRootRelative ? JsonElement.Parse("true") : JsonElement.Parse("false"));
 
                 Transform root = ReadTransformFromSlot(dataElement);
 
                 var children = dataElement.GetProperty("children").EnumerateArray();
                 foreach( var child in children )
                 {
-                    switch(child.GetProperty("name").GetProperty("value").ToString())
+                    string nameString = child.GetProperty("name").GetProperty("value").ToString();
+                    switch (nameString)
                     {
                         case "Head":
                             user.boneTransforms[0] = ReadTransformFromSlot(child);
-                            user.boneTransforms[0].position += root.position;
+                            user.boneTransforms[0].position = Vector3.Transform(user.boneTransforms[0].position, root.rotation) * root.scale + root.position;
+                            user.boneTransforms[0].rotation *= root.rotation;
+                            user.boneTransforms[0].scale *= root.scale;
                             user.boneNames[0] = "Head";
                             break;
                         case "Left Hand":
                             user.boneTransforms[1] = ReadTransformFromSlot(child);
-                            user.boneTransforms[1].position += root.position;
+                            user.boneTransforms[1].position = Vector3.Transform(user.boneTransforms[1].position, root.rotation) * root.scale + root.position;
+                            user.boneTransforms[1].rotation *= root.rotation;
+                            user.boneTransforms[1].scale *= root.scale;
                             user.boneNames[1] = "LHand";
                             break;
                         case "Right Hand":
                             user.boneTransforms[2] = ReadTransformFromSlot(child);
-                            user.boneTransforms[2].position += root.position;
+                            user.boneTransforms[2].position = Vector3.Transform(user.boneTransforms[2].position, root.rotation) * root.scale + root.position;
+                            user.boneTransforms[2].rotation *= root.rotation;
+                            user.boneTransforms[2].scale *= root.scale;
                             user.boneNames[2] = "RHand";
                             break;
+                    }
+                    // TODO: Recognize Vive Trackers by name (64-char string containing no dots or spaces)
+                    //          Then inject them as "tracker..." with SN as tag (so we can map unique objects to them)
+                    // QUESTION: Do we need to track them? Maybe not, as the world update should be consistent?
+                    //              I'm guessing the rename before worldUpdate.Add will be stable (and thus recognize them on the other side)
+
+                    // TODO: Figure out if this name is always the same (I sure hope so, but ... maybe not?)
+                    if (nameString.Length == 64) // interpret this as a Vive Tracker
+                    {
+                        string shortName = nameString.Substring(0, 6);
+                        WorldObject tracker = new();
+                        tracker.id = ReadIDFromSlot(child); // TODO: Test!
+                        tracker.tag = shortName;    // Maybe let the user change this?
+                        tracker.name = "tracker-" + shortName;
+                        tracker.home = Id;
+
+                        // Get local position
+                        tracker.transform = ReadTransformFromSlot(child);
+
+                        // Calculate absolute position
+                        tracker.transform.position = Vector3.Transform(tracker.transform.position, root.rotation) + root.position;
+                        tracker.transform.rotation *= root.rotation;
+
+                        // Inject empty data (do we need any data on this object?)
+                        tracker.data = [.. new DataContainer[0]];
+
+                        // Add to WorldUpdate
+                        worldUpdate.objects.Add(tracker);
                     }
                 }
 
                 worldUpdate.users.Add(user);
             }
+        }
+
+        private string ReadIDFromSlot(JsonElement slot)
+        {
+            return slot.GetProperty("id").ToString();
         }
 
         private Transform ReadTransformFromSlot( JsonElement slot )
